@@ -9,6 +9,9 @@
 
 /* Callbacks not listed are NULL. */
 static const struct app_callbacks user_app_callbacks = {
+    .app_on_connection                  = user_app_on_connection,
+    .app_on_disconnect                  = user_app_on_disconnect,
+    .app_on_adv_undirect_complete       = user_app_on_adv_undirect_complete,
     .app_on_set_dev_config_complete     = user_app_on_set_dev_config_complete,
     .app_on_db_init_complete            = default_app_on_db_init_complete,
     .app_on_generate_static_random_addr = user_app_generate_static_addr,
@@ -20,7 +23,7 @@ static const struct arch_main_loop_callbacks user_app_main_loop_callbacks = {
     .app_on_init            = default_app_on_init,
 };
 
-/* Called by default_app_on_db_init_complete(). */
+/* Called by default_app_on_db_init_complete() and, after a disconnect, by user_app_on_disconnect(). */
 static const struct default_app_operations user_default_app_operations = {
     .default_operation_adv = user_app_adv_start,
 };

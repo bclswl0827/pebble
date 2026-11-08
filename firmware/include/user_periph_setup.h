@@ -31,6 +31,7 @@
 #define SPI_DI_PIN GPIO_PIN_3
 
 void leds_set(uint8_t mask);
+uint8_t leds_get(void);
 void periph_init(void);
 void GPIO_reservations(void);
 

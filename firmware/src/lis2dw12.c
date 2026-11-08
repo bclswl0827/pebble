@@ -24,17 +24,18 @@
 #define CTRL4_INT1_WU           (0x20)
 #define CTRL7_INTERRUPTS_ENABLE (0x20)
 
-/* ODR 25 Hz, low-power mode 1. */
-#define CTRL1_VALUE             (0x30)
+/* ODR 12.5 Hz, low-power mode 1. */
+#define CTRL1_VALUE             (0x20)
 /* Full scale +-4 g. */
 #define CTRL6_VALUE             (0x10)
 /*
  * Wake-up threshold, 1 LSB = FS / 64 = 62.5 mg. The wake-up function compares
  * the slope (difference of consecutive samples), so the effective sensitivity
- * also depends on the ODR. 1 g at 25 Hz needs a hard shake; normal handling and
- * gentle shaking stay below it. Lower it if a hard shake is not detected.
+ * also depends on the ODR: a 3-5 Hz shake gives a larger slope at 12.5 Hz than
+ * at 25 Hz. Raise it if gentle shaking triggers, lower it if a hard shake is
+ * not detected.
  */
-#define WAKE_UP_THS_VALUE       (16)
+#define WAKE_UP_THS_VALUE       (28)
 
 struct lis2dw12_probe lis2dw12_probe_result;
 

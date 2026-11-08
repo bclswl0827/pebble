@@ -10,8 +10,12 @@
 #define CFG_WDOG
 #undef CFG_WDG_TRIGGER_HW_RESET_IN_PRODUCTION_MODE
 #define CFG_MAX_CONNECTIONS     (1)
-/* Debug build: GPIO reservation checks, breakpoints in HardFault/NMI. */
-#define CFG_DEVELOPMENT_DEBUG
+/*
+ * Production build: an assert, HardFault or watchdog NMI resets the chip. With
+ * CFG_DEVELOPMENT_DEBUG they halt with the watchdog frozen, i.e. the tag goes
+ * silent until a power cycle. Define it only while debugging over SWD.
+ */
+#undef CFG_DEVELOPMENT_DEBUG
 #undef CFG_PRINTF
 #undef CFG_UART1_SDK
 #undef CFG_SPI_FLASH_ENABLE

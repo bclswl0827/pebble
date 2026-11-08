@@ -1,7 +1,7 @@
 #ifndef USER_CONFIG_H
 #define USER_CONFIG_H
 
-/* Based on the SDK ble_app_noncon user_config.h: non-connectable broadcaster. */
+/* Based on the SDK ble_app_noncon user_config.h, made connectable for the DULT sound service. */
 #include "app_user_config.h"
 #include "arch_api.h"
 #include "app_default_handlers.h"
@@ -24,9 +24,14 @@ static const struct advertise_configuration user_adv_conf = {
     .intv_min = MS_TO_BLESLOTS(USER_ADV_INTERVAL_MS),
     .intv_max = MS_TO_BLESLOTS(USER_ADV_INTERVAL_MS),
     .channel_map = ADV_ALL_CHNLS_EN,
-    /* Broadcaster mode: no Flags AD, so all 31 bytes are available. */
-    .mode = GAP_BROADCASTER_MODE,
-    .adv_filt_policy = ADV_ALLOW_SCAN_ANY_CON_WLST,
+    /*
+     * Broadcaster mode is non-connectable only. In connectable modes GAPM prepends a 3-byte
+     * Flags AD, which leaves 28 bytes; user_app.c then writes the 31-byte Find My payload
+     * straight to the link layer.
+     */
+    .mode = GAP_NON_DISCOVERABLE,
+    /* CON_WLST would only accept connections from whitelisted centrals. */
+    .adv_filt_policy = ADV_ALLOW_SCAN_ANY_CON_ANY,
     .peer_addr = {0x1, 0x2, 0x3, 0x4, 0x5, 0x6},
     .peer_addr_type = 0,
 };
@@ -42,7 +47,7 @@ static const struct advertise_configuration user_adv_conf = {
 #define USER_DEVICE_NAME_LEN        (sizeof(USER_DEVICE_NAME)-1)
 
 static const struct gapm_configuration user_gapm_conf = {
-    .role = GAP_ROLE_BROADCASTER,
+    .role = GAP_ROLE_PERIPHERAL,
     .max_mtu = 23,
     .addr_type = APP_CFG_ADDR_TYPE(USER_CFG_ADDRESS_MODE),
     .renew_dur = 15000,

@@ -4,8 +4,14 @@
 #include "co_bt.h"
 #include "ke_msg.h"
 
+struct gapc_connection_req_ind;
+struct gapc_disconnect_ind;
+
 void user_app_on_set_dev_config_complete(void);
 void user_app_adv_start(void);
+void user_app_on_adv_undirect_complete(uint8_t status);
+void user_app_on_connection(uint8_t conidx, struct gapc_connection_req_ind const *param);
+void user_app_on_disconnect(struct gapc_disconnect_ind const *param);
 void user_app_generate_static_addr(struct bd_addr *addr);
 void user_catch_rest_hndl(ke_msg_id_t const msgid,
                           void const *param,

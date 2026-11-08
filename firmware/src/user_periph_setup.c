@@ -33,6 +33,11 @@ void leds_set(uint8_t mask)
     led_write(LED_3_PIN, mask & LED_3);
 }
 
+uint8_t leds_get(void)
+{
+    return led_mask;
+}
+
 void periph_init(void) {
     /* Buck mode: system_init() already set up the DC-DC; do not reconfigure it here. */
     patch_func();
