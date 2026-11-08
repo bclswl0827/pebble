@@ -1,0 +1,1157 @@
+# AGENTS.md
+
+Rules for agents working on OpenTagViewer. Written for automated contributors, but the
+constraints apply to anyone.
+
+**This file is owned and maintained by agents, and keeping it current is part of the work rather
+than a favour to whoever comes next.** @parawanderer asked for that and has not read it since. No
+human reviews what lands here, so the agent writing a change is the only check on it.
+
+What that means in practice:
+
+- **If you learned something the hard way, write it down in the same change that taught you.** The
+  next agent starts here, and anything left out is an afternoon they pay for and you did not.
+- **The reason travels with the rule.** An instruction with no reasoning attached is one a later
+  agent deletes the first time it looks inconvenient. That is why the entries here argue.
+- **Earn it.** Nobody is filtering this, so a rule that has not actually cost somebody something
+  does not belong. Rule 10 has the test.
+- **Do not carry this register outside the repository.** It is written for agents who need to be
+  argued out of breaking something. A pull request review, an issue reply, or anything else a
+  person reads is a different job. See rule 17.
+
+## What this project is
+
+An Android app that shows Apple AirTag locations without an Apple device. Tags are exported
+from a Mac once (see the wiki), imported as a zip, and located via Apple's Find My network
+through [FindMy.py](https://github.com/malmeloo/FindMy.py).
+
+| Layer | Technology |
+| --- | --- |
+| App | Android, **Java** (not Kotlin), Gradle Kotlin DSL, `compileSdk`/`targetSdk` 35, `minSdk` 24 |
+| Apple protocol | **Chaquopy** — CPython 3.12 embedded, bridged in `app/src/main/python/main.py` |
+| Persistence | **Room** (`opentagviewer-db`) |
+| Async | **RxJava3** through repositories and services |
+| Boilerplate | **Lombok** (`@Builder`, `@Getter` on entities) |
+| Desktop exporter | `python/` — tkinter wizard, PyInstaller |
+
+`app/src/main/python/` is packaged into the APK by Chaquopy. Nothing in it may import
+Android or Java types — that is what makes it testable on plain CPython.
+
+### It ships as an APK, and there is no Play Store listing
+
+There is no listing and none is planned. Releases are GitHub releases; people sideload them.
+
+**So "Play Store policy requires it" is never a reason for anything here**, and an argument
+leaning on it has nothing behind it. That cuts in a direction people find surprising: the
+manifest's declarations, the permission flags and the data-safety claims in comments still have
+to be *true* — because Android acts on them and because people read this source — not because a
+reviewer will check. Nobody is going to check. That is the point.
+
+Do not build for a listing that does not exist.
+
+---
+
+## Rules
+
+### 1. Never ship a Room schema change without a migration
+
+Bumping `version` without a `Migration` throws at first database access **on upgrade only**.
+A fresh install works fine, so it passes casual testing and then destroys every existing
+user's imported beacons and location history.
+
+- Add a `Migration` and register it in `addMigrations(...)`
+- **Never** use `fallbackToDestructiveMigration()` — recovery means redoing the macOS
+  export, and `allowBackup` is false so there is no backup
+- Add a migration test, including the direct path from the oldest version (users skip
+  releases)
+- Schemas are exported to `app/schemas/` and committed; include the new JSON in your change
+
+### 2. Do not claim something works if you have not run it
+
+Say plainly what was verified, what was assumed, and what could not be checked. If a change
+needs a real Apple account, a real Mac, or hardware you do not have, state that rather than
+implying coverage. A wrong "this works" is worse here than an honest gap, because the
+failure mode is silent data loss on other people's devices.
+
+### 3. Verify library behaviour against the installed version
+
+FindMy.py's API changes significantly between minor versions. Methods and properties that
+existed in 0.7.x are gone in 0.9.x. Before "fixing" code that looks wrong, check the pinned
+version's actual source — several apparent bugs here are forced adaptations.
+
+```bash
+python -m venv .venv && .venv/bin/pip install "FindMy==<pinned version>"
+```
+
+### 4. Respect the Anisette constraints
+
+- **FindMy's own local provider still does not work.** `anisette` needs `unicorn`, a CPU
+  emulator Chaquopy cannot build for Android. `app/stubs/unicorn/` is a stand-in that makes
+  the dependency tree resolve; every method raises. The stub is not a step toward enabling
+  `aniLocal`, and never will be.
+- **Unicorn ships as native code, GPL-2.0 and all, and that was decided rather than missed.**
+  The emulated Mac (rule 21) runs it in `libmacadi.so`. Before replacing it with a permissive
+  emulator for licence reasons, read
+  [docs/emulated-mac-emulator-choice.md](./docs/emulated-mac-emulator-choice.md): a replacement
+  is invisible to users **only if it produces the same bytes**, because the emulator is not part
+  of the machine identity but its output is. `scripts/adi-emulator-diff/` is the check, and it has
+  not yet been run over the OTP path (both drivers take a provisioned store for that). The same doc says what the GPL obliges: a notice, and the
+  library kept in its own process.
+- **The app does run ADI locally, by a different route.** `app/src/main/java/.../anisette/`
+  loads Apple's real Android ADI libraries in-process and produces Anisette here, falling
+  back to a remote server when it cannot. That is unrelated to `aniLocal` and needs no
+  emulator — the libraries are native Android code. See `CONTRIBUTING.md` for how to run its
+  tests.
+- **Sessions are bound to one machine identity.** Local and remote Anisette present different
+  ones, as do two different servers. Changing it requires a re-login. That is inherent to how
+  Apple binds the session, not a bug to work around.
+- **So a fallback must say so.** Accounts are deliberately serialized as `aniRemote` even
+  when established locally, because the ADI state lives in app storage and not in the account
+  — this keeps exported logins restorable anywhere. The cost is that a locally-established
+  session can end up continuing against a server, and Apple will see a different machine.
+  `LocalAnisette.recordSessionProvenance` records which kind established the session so that
+  this is reported rather than presenting as auth that silently stops working. Never remove
+  that warning to make a log quieter.
+- **A native crash is not an exception, and the fallback above cannot see one.** `ensureReady`
+  catches everything and falls back to a remote server, which is the right design and was not
+  enough: on some phones Apple's `libstoreservicescore.so` died inside `dlopen`, in its own
+  static initialisers, with a `SIGBUS` (`BUS_ADRALN`) — issue #232, a Pixel 5 and a Redmi
+  Note 11 Pro+ 5G. The process dies inside the call, the `catch` never runs, and because the
+  sign-in screen checks Anisette the moment it opens, 1.1.0 could not be opened at all on those
+  devices.
+
+  **The cause was ours: a stub that returned a C++ object by value.** `makeWorkQueue`, in our
+  generated `libmediaplatform.so` stand-in, returns a `std::shared_ptr` through a buffer the caller
+  passes (`x8` on arm64, a hidden first argument on x86_64). The generated `long f(void) { return
+  0; }` never wrote it, and a constructor in Apple's library read the leftover stack as a control
+  block and incremented through it. Zero on most phones, so nothing happened; a live misaligned
+  pointer on those two. It had been recorded as "harmless, our stub returns NULL" on the strength
+  of provisioning succeeding — which says nothing about what a stub leaves in its caller's memory.
+  It is hand-written in `stubs/libmediaplatform_handwritten.cpp` now, and `MakeWorkQueueStubTest`
+  calls it into a garbage-filled buffer so it fails on any ABI. **Before marking a stubbed call
+  harmless, check its return type in the caller's disassembly**, not whether the run completed.
+  So the library is loaded **in a throwaway process first** — `AppleLibraryProbeService`, declared
+  with `android:process=":adiprobe"` — and the app loads it only if that process survived
+  (`TryItElsewhereFirst`, answer kept per app version, ABI and library build). A death over there
+  is reported to the app by the binder and nobody sees a crash, including people upgrading from
+  1.1.0 who have no record of one. Both processes run `LocalAnisette.openAndInitialise`, so **add
+  any new pre-provisioning call into Apple's code there**, or a pass in one says nothing about the
+  other. `OpenAirTagApplication` returns early in that process: starting Python there would unpack
+  Chaquopy's assets from two processes at once.
+
+  `NativeLoadGuard` is the backstop behind it: a record written before the native calls and removed
+  after, so a record still there at the next launch means the load never returned. Keep anything
+  slow (network, provisioning) **outside** that window — a user closing the app mid-wait leaves the
+  same record a crash does — and keep its store on `commit()`: `apply()` writes asynchronously and
+  dies with the process, which would pass every test and never once record a crash.
+
+  **CI now loads Apple's library for real, on both architectures, without an emulator** -
+  `adi-on-bionic.yml`, which runs it under Android's own linker and libc on plain x86_64 and arm64
+  Linux runners (`app/src/test/adi-on-bionic/`). The emulator suite cannot do that part: the managed
+  device is x86_64. What it does instead is `ApplesRealLibraryOnThisDeviceTest`, which runs by default
+  and takes the app's own path - download, manifest check, the separate process, `openAndInitialise`,
+  JNI - up to "not provisioned", with nothing sent to Apple but the library download. Provisioning
+  stays opt-in (`anisetteLiveTests`), because that is the part that talks to Apple's servers.
+  **Whether the old stub crashed depended on the architecture and the bionic build** - arm64 on both
+  Android 9 and 14 bionic, x86_64 on 9 only, and x86_64 on 14 not at all - so a green run on one
+  combination says nothing about the others, and the probe's "no generated stub was called" check
+  is the only thing that fails on the last. Keep all four, and keep the negative control that puts
+  the pre-fix stub back and requires the job to fail. `native-stubs.yml` checks the stubs' exports
+  and return conventions on their own, in seconds.
+
+### 5. Never bundle an AMap API key
+
+AMap issues keys per developer account, bound to a package name and signing fingerprint, and
+expects the key holder to be the app's operator. Users supply their own in Settings, applied
+at runtime via `MapsInitializer.setApiKey`.
+
+Selecting AMap without a key must not save — both in Settings and on the first-run screen.
+
+### 6. Keep both key-alignment paths working
+
+Without a `KeyAlignmentRecord`, `FindMyAccessory` starts at index 0 from its pairing date, so
+the first fetch searches the tag's entire history — ~50,000 keys for an 18-month-old tag, at
+Apple's ~290-keys-per-request limit. That is an account-flagging risk, not just slowness.
+
+- Exports from format `0.0.2` onward carry the record; it is passed to
+  `FindMyAccessory.from_plist(plist, key_alignment_plist)`
+- Older exports have none and fall back to the probe in `main.py`
+- Changes must not break either path
+
+### 7. Add map providers behind `IMapProvider`
+
+Do not branch inside `MapsActivity`. The abstraction exists precisely so a new provider is a
+new implementation — a third party added a MapLibre provider in ~80 lines because of it.
+
+### 8. Attribute other people's work
+
+When merging a contributor's changes, preserve authorship — cherry-pick, or set `--author`,
+rather than copying file contents into your own commit. Credit them in the PR description.
+
+### 9. Bump the exporter's `VERSION` before tagging a release
+
+`VERSION` in `python/exporter/version.py` is the only place the desktop exporter's version is
+written. It reaches the window title and, more importantly, every export it produces, as
+`via: <producer>:<version>` in `OPENTAGVIEWER.yml` — which is how anyone looking at a zip later
+works out what built it.
+
+**There is more than one producer, and they must not claim to be each other.** The windowed
+exporter stamps `OpenTagViewer.wizard:<version>`, its CLI stamps `OpenTagViewer.cli:<version>`, and
+the Android app will stamp its own. They share `VERSION` because they ship together; the name in
+front of it is what makes a bug report answerable. The shared writer takes `via` as a parameter
+and never invents one — see `python/opentagviewer_export/bundle.py`.
+
+Nothing patches it at build time, and nothing should: the wizard also runs from source (the
+VM bootstrap, `python -m exporter.wizard`), and those exports stamp `via:` too, so a build-time
+patch would make two artifacts from one commit disagree.
+
+So releasing is two steps, in this order:
+
+1. Commit the `VERSION` bump to `main`
+2. Tag that commit `exporter-v<the same version>` and publish the release
+
+**And the app's release goes out before the exporter's, whenever the exporter's changes what a
+bundle is.** They are separate releases with separate tags, which makes them look independent;
+they are not. A locked bundle cannot be opened by an app older than 1.1.0 at all — it fails with a
+message about the zip rather than about a code. Publish an exporter that locks by default before
+that app is out, and every bundle written that day is unopenable by whoever receives it, and the
+recipient is the one person in that transaction who chose none of it and can fix none of it.
+
+**The wizard has no lock switch at all**, and that is stronger than a default. `_write_it` calls
+`generate_passcode()` unconditionally, so no path from that window produces an unlocked bundle;
+`test_wizard_bundle_locking.py` asserts the control's *absence*, by attribute and by walking the
+widgets, rather than asserting a value somebody can flip back.
+
+It was a ticked checkbox, and a ticked checkbox is one idle click from an unlocked zip holding
+key material that cannot be revoked. That click gets made: a user sent @parawanderer their tags
+in an unlocked bundle. **Do not restore it** — the person the lock protects is precisely the
+person who would untick it to make a message go away.
+
+The escape hatch is `exporter.cli`'s `--no-password`, and its being CLI-only is the design rather
+than an omission. Somebody who found a flag and typed it has chosen an unlocked bundle; somebody
+clicking through a window has not, and offering both the same control treats those as one
+decision.
+
+**It was flipped on before app 1.1.0 was published, which is not what the paragraph above
+describes, and the exception is worth understanding rather than copying.** The ordering exists to
+protect the recipient — the person who chose neither the exporter nor its version. In September
+2026 there was no such person left to protect: Apple's edge had begun refusing every client that
+named `com.apple.dt.Xcode`, which is every app release up to and including 1.0.5, so those
+installs could not sign in at all and an unlocked bundle bought their owner nothing. A locked
+bundle was not unopenable *forever*, only until 1.1.0 — the same release that made the app work
+again in the first place. So locking early cost nobody anything.
+
+Read that as a statement about how narrow the exception was, not as licence. The rule's condition
+is a working older app in somebody's hands, and it was discharged by Apple breaking every one of
+them, not by a judgement that recipients matter less than convenience.
+
+**A gate on the format must not hold back unrelated fixes.** This nearly happened: the fix for
+[#140](https://github.com/parawanderer/OpenTagViewer/issues/140) — where every share comes back
+unreadable and the export fails outright — sat unreleased behind this ordering because it happened
+to be on the same `main` as the locking change. Three people reported the same bug in the meantime.
+If a fix does not touch what a bundle *is*, it is not what this rule is about, and shipping it
+should not wait on an app release.
+
+Nothing enforces any of this — `release_version.py` checks a tag against a version, not one release
+against another — so it is a thing to remember, which is why it is written here.
+
+`scripts/release_version.py --kind exporter --tag <tag>` enforces it, and runs in `test-release-version`
+before any build job. A tag that disagrees fails the release rather than shipping a build that
+lies about itself. `macos-exporter-v` is the old spelling and still resolves, because tags already
+published keep their name — but it stopped being true when the exporter started building for
+Windows and Linux. Full procedure: [CONTRIBUTING.md](./CONTRIBUTING.md#releasing-the-exporter).
+
+### 10. Update the docs that index what you added
+
+Some files list things rather than describe them, so they go stale silently — nothing fails,
+the list is just quietly wrong, and the next person trusts it.
+
+If you add or change one of these, update its index in the same commit:
+
+| You added | Update |
+| --- | --- |
+| A workflow in `.github/workflows/` | the CI table in [CONTRIBUTING.md](./CONTRIBUTING.md#continuous-integration) |
+| A test suite, or one that needs opting into | the test table and its section in `CONTRIBUTING.md` |
+| A script in `scripts/` that people run by hand | the section of `CONTRIBUTING.md` covering that workflow |
+| A skill in `.claude/skills/` | the skills table below |
+| A constraint that would take someone an afternoon to rediscover | a rule here |
+
+Skills carry the longer version of a workflow, so this file can stay short:
+
+| Skill | For |
+| --- | --- |
+| `.claude/skills/add-strings/` | any user-facing string — adding, rewording, removing, checking |
+| `.claude/skills/device-screenshots/` | rendering the UI on the managed device and reading it cheaply |
+| `.claude/skills/watch-pr/` | watching a pushed PR's checks through to a verdict, and acting on it |
+| `.claude/skills/watch-gradle-tests/` | watching a backgrounded emulator suite to a verdict, and telling the silent hangs apart |
+| `.claude/skills/investigating-bug-reports/` | reading an issue completely — every comment, every image — before diagnosing or replying |
+
+The test for whether it belongs here rather than in a comment: would somebody hit it *before*
+reading the code that explains it? Anisette's machine-identity binding is the example — it
+presents as auth failing for no reason, hours away from the code responsible.
+
+### 11. The app is one device, and every path must say the same thing
+
+Everything this app does against Apple is attributed to a device identity it invents, and the
+user sees the result: an entry in their Apple account's device list, with a *Remove from Account*
+button next to the words "If you do not recognise this device".
+
+**So the identity has to be one identity.** It is assembled in more than one place — the client
+info string in `anisette/AdiDeviceIdentity.java`, the hardware headers, the serial the FindMy.py
+providers take as a parameter — and paths that disagree do not fail. They register **separate
+devices**, and the user is invited to remove things they cannot identify, which breaks the
+session that was working.
+
+Under the iCloud export route the same identity reaches two further places a person reads: the
+escrow record's metadata, which is the only way to recognise a record in a listing, and the
+peer's `serialNumber` in the keychain trust circle. A serial that differs between them makes one
+client look like several — and by
+[findmy-export §5.2](./docs/findmy-export/03-keychain-trust.md), serials are exactly what
+distinguishes devices there.
+
+Four things follow:
+
+- **One source of truth.** A path that needs the identity reads it; it does not compose its own.
+  `AdiDeviceIdentity.Hardware` is it — Python reads the six values across the bridge rather than
+  keeping a copy, because the profile is a runtime choice and not a constant: an install must
+  present the hardware its ADI was provisioned with, whatever that was.
+
+  **Today that is always `LEGACY_MAC`.** `Hardware.DEFAULT` is it, a fresh install gets it, and
+  `IPHONE` is built and deliberately not chosen — see `generate()`. So every entry this project
+  registers currently appears as a `MacBookPro` on macOS 13.1, and the serial is the only thing
+  distinguishing it from real hardware. The exporter is separately a MacBook Pro on macOS 13.4.1,
+  FindMy.py's own default.
+
+  Changing which profile a fresh install gets is not a cosmetic edit: it registers a *second*
+  device rather than renaming the first, for anybody who reinstalls. That is why `IPHONE` exists
+  unused rather than being switched on.
+- **The parts must agree with each other.** Model, OS version, build, CFNetwork and Darwin
+  describe one real release ([findmy-export §2.2](./docs/findmy-export/01-authentication.md)).
+  Claiming a Mac in one string and an iPhone in another is a contradiction Apple's own clients
+  never produce.
+- **The serial is a label, and the only field here the user actually sees.** Uppercase
+  alphanumeric, confirmed accepted and displayed. Without one, Apple omits the row entirely,
+  leaving an entry with nothing to tell it apart from real hardware.
+- **It is drawn per install, and the prefix is what carries the recognition.** The app sends
+  `0PENTAGV` plus four characters, the exporter `0PENTAGX` plus four, from an alphabet that
+  leaves out the pairs a person comparing two screens would confuse. **Do not put it back to a
+  constant.** It was one, and that meant a single serial arriving at Apple from thousands of
+  installs, against thousands of different machine identities and Apple IDs, from every continent
+  at once — a shape no real hardware produces, and worth not sending on that basis alone.
+
+  **It had nothing to do with the Grand Slam 503s, and this rule claimed it did.** That guess was
+  written into four files before anyone tested it. The actual cause was Apple's edge refusing any
+  request whose `X-MMe-Client-Info` names `com.apple.dt.Xcode` — see rule 18. Serials were
+  eliminated on the way there: a drawn one, the old constant, and upstream FindMy.py's bare `0`
+  were all refused identically, and a QEMU macOS VM signs in happily with a fabricated `C02…`
+  serial that is **not even unique across installs**. Apple does not appear to check the serial at
+  all.
+- **An install that already has one keeps it**, including the installs that predate this and have
+  no stored serial at all: those keep `0PENTAGVIEWR` / `0PENTAGXPORT`. Neither of those can be
+  drawn — both contain a letter the alphabet excludes — so a serial with an `I` or an `O` in it
+  is, by construction, an install from before the change. That is worth preserving when reading a
+  report, and `DrawingTheSerialTest` pins it.
+- **Sending the same value is not the same as sending the same bytes.** Two of these fields are
+  transformed on the way out, and only by one side. FindMy.py sends `X-Apple-I-MD-LU` as
+  `base64(uid)` and uppercases `X-Mme-Device-Id`; the Java ADI path sends what it is given. So
+  handing Python the string Java sends aligns one field and silently leaves the other as two
+  different values — **alignment that reads as alignment and is not**, which is worse than none,
+  because nothing ever complains. Java renders the header per hardware profile for exactly this
+  reason, and `IdentityBridgeTest` pins both directions. Check what actually goes on the wire
+  before believing two paths agree.
+
+**Changing it later adds an entry rather than renaming one**, and may require signing in again,
+so it is not a thing to adjust casually once shipped — which is the whole reason the serial is
+drawn once, on the first run that needs an identity, and then persisted beside the rest of it
+(`LocalAnisette.KEY_SERIAL`, and `device-identity.json` for the exporter). A serial redrawn per
+sign-in would add a device-list entry every time, which is a worse bug than the constant was.
+Document what the app registers as, so a user reading their device list can recognise it — see
+the wiki, which names the prefix rather than a full serial for this reason.
+
+### 12. A UI change gets a test that inflates it, and one that drives it
+
+UI is where this repo's silent failures live. Nothing throws, the build is green, and the
+screen is simply wrong — blank, unreadable, or quietly dropping what the user typed. Every
+example below shipped or nearly shipped here.
+
+**Inflate it. Almost always, and it is cheap.** No activity, no account, no network: build a
+themed context, inflate, measure, draw to a bitmap. `SystemColorsLayoutTest` is the pattern.
+What to actually assert:
+
+| Check | The failure it catches |
+| --- | --- |
+| It inflates at all | a missing `?attr/`, a style that does not exist in this theme, a bad `tools:` leak — throws at runtime only, on the one screen nobody opened |
+| Every id the code looks up resolves | a renamed id still compiles; `findViewById` returns null and the screen half-works |
+| Drawables load **the way the app loads them** | `ResourcesCompat.getDrawable(..., null)` draws a theme-attribute vector as *nothing*. The history timeline went blank this way while its screenshot test stayed green, because the test passed a theme and the app did not |
+| Resolved colours, not named ones | contrast is a number: 3:1 non-text, 4.5:1 AA. A selected pin here once landed at 1.23:1 — present, correct, invisible |
+| Dark mode, as a second render | `createConfigurationContext` with `UI_MODE_NIGHT_YES`. Half of what breaks only breaks in one mode |
+| Measured size is not zero, and does not clip | `wrap_content` on something that measures to nothing |
+| A screenshot, alongside the assertions | it explains *why* a failure looks wrong. **It is not itself an assertion** — see below |
+
+**Then drive it with Espresso and fakes, for the error paths as much as the success one.**
+Success gets exercised by hand constantly; failures do not, and failures are what users meet.
+`AppDependencies.replaceAnisette` and the fake auth service exist for exactly this — states
+that would otherwise need Apple to have shipped a new build or the network to be down.
+`TestHostActivity` hosts a dialog without starting an activity that wants an Apple session.
+
+Assert what the user is told, per failure, not merely that something failed. Every import
+error used to arrive at one toast telling people to restart the app, and no test noticed
+because no test asked what it said.
+
+**Two habits that make the difference between a test and a decoration:**
+
+- **Check the test can fail.** Break the thing on purpose and confirm it goes red. Ten
+  green tests first try is a reason for suspicion, not confidence — the paste handling in
+  `BundlePasscodeDialogTest` was verified this way, by reinstating the truncation bug it
+  exists to catch and watching exactly two of the ten turn red.
+- **A screenshot is not an assertion.** It shows what one configuration looked like once.
+  Assert the resolved colour, the ratio, the measured height — and be careful what the
+  assertion is *about*.
+
+The mechanics of all of this — `Eventually`, the managed device, rendering to a bitmap and
+compacting the results — are under [Building and testing](#building-and-testing) below. Do not
+restate them here; this rule is about *what* to cover, that section is about *how*.
+
+### 13. If it does not need a device, test it on the JVM
+
+`./gradlew testDebugUnitTest` runs the JVM suite in about fifteen seconds. The emulator suite is
+**580 tests and twelve minutes**, and it has to boot a device first. So a test that could have
+been a JVM test and was written as an instrumented one costs that difference on every run, for
+every person, forever — and it is the reason a suite stops being run while working.
+
+**Ask what the class actually touches, not which package it lives in.** Parsing, arithmetic,
+policy, protocol shapes, anything taking bytes and returning bytes: JVM. A `dev.wander.…android…`
+package name is not an answer, and neither is "it feels like Android code".
+
+**A stray `Log` line is not a reason to go to the emulator.** This is the trap, because it looks
+like one: `android.util.Log` throws *"not mocked"* in a JVM test, so a class that is otherwise
+pure Java appears to require a device. It does not — `testOptions.unitTests.isReturnDefaultValues`
+is already on, and Log returns 0 instead of throwing.
+
+The worked example is `AdiLibraryFetcher`, which reads Apple's ADI libraries out of a 142 MB APK
+over HTTP range requests. Zip parsing, offset arithmetic, an inflate and an ELF check — and one
+`Log.i` in the middle of it, which is why it was first written as an instrumented test:
+
+| | |
+| --- | --- |
+| As an instrumented test | ~17s, after provisioning an emulator |
+| As a JVM test | **0.145s**, inside a suite you can run on every edit |
+
+Both were the *same six tests*, against the same code, serving a fixture zip off a socket on
+`127.0.0.1`. Nothing was given up by moving it.
+
+Two things follow:
+
+- **"It reaches the network" is rarely a reason either.** A `ServerSocket` and a byte array cover
+  an HTTP client completely, and far better than the real endpoint does — see `FakeApkServer`,
+  which can also refuse to honour range requests, something Apple's CDN will not do on request.
+- **The JVM suite is still not the one to report "tests pass" from.** Every screen, every
+  repository and the whole Python bridge are instrumented. Rule 12 is about what genuinely needs
+  a device; this rule is about not sending it things that do not.
+
+### 14. A Python dependency is pinned in four places, and they all move together
+
+There is no single manifest. `opentagviewer_export` is shared code that runs under **both**
+interpreters — Chaquopy packages it into the APK, and the desktop exporter runs the same files
+from source — so every Python dependency is declared once per consumer:
+
+| Where | What it feeds | How to change it |
+| --- | --- | --- |
+| `app/build.gradle.kts` — the `install(…)` lines in the Chaquopy block | **what ships in the APK** | by hand |
+| `app/src/test/python/requirements.txt` | the Chaquopy bridge tests | by hand |
+| `python/pyproject.toml` | the desktop exporter and its tests | by hand |
+| `python/uv.lock` | what `uv sync --frozen` actually installs | `cd python && uv lock` — never by hand |
+
+**Miss one and the two halves ship different libraries.** That is not version skew: FindMy.py is
+pinned by commit off a fork, and its API moves between commits (rule 3), so one consumer gets
+methods the other does not. It has happened — `requirements.txt` said `FindMy==0.9.8` from PyPI
+while the app built the fork, and both lines were individually true for months.
+
+Two tests in `app/src/test/python/test_main.py` enforce it, and they are worth knowing by name
+because they fail in a place that looks unrelated:
+
+- `test_the_whole_repository_pins_one_findmy`
+- `test_pinned_versions_match_the_app_build` — every install, including the `git+…` ones, which
+  is the shape that was invisible to it before
+
+They run in the **Chaquopy bridge tests** step of `build-debug.yml`, which is *before* the APK is
+built. So a missed pin presents as **"the APK build failed"** with the APK steps merely skipped,
+and the actual assertion is several steps up the log. Read the step list before believing the
+build broke:
+
+```bash
+gh api repos/parawanderer/OpenTagViewer/actions/jobs/<job-id> \
+  --jq '.steps[] | "\(.conclusion // .status)\t\(.name)"'
+```
+
+Run them before pushing — they need no device and take under a second:
+
+```bash
+python -m venv .venv && .venv/bin/pip install -r app/src/test/python/requirements.txt
+.venv/bin/python -m pytest app/src/test/python -q
+```
+
+The same applies to every other shared dependency, not just FindMy.py: `PyYAML` is pinned in
+`app/build.gradle.kts` and `python/pyproject.toml` for exactly this reason.
+
+### 15. Every call to iCloud has to answer "is this session dead?"
+
+A failed call to Apple is one of two things, and they need opposite screens. Most are weather -
+a timeout, a bad afternoon at iCloud - and the answer is to try again later. **A refused sign-in
+is permanent**, and the only remedy is one the user has to perform.
+
+Getting it the wrong way round is not cosmetic. The retry screen for a dead session invites an
+action that fails identically every time and explains nothing; a forced sign-out for a transient
+failure costs somebody a working session for nothing.
+
+**So anything that reaches the account handles it, and through the shared decision rather than
+its own.** `ICloudFailures.meansSignInAgain(error)` is the question; `SignInAgain.from(activity)`
+is the answer. Three screens had written the judgement separately, and all three had it
+differently — the iCloud list said retry, a failed rename said "renaming failed" so people tried
+a shorter name, and the six-hourly account read logged a warning and carried on for another six
+hours.
+
+**Classify in `icloud_bridge._unexpected`, not at the call site.** Every method on that class
+ends in the same `except Exception`, and there are eight of them; naming a failure at one leaves
+the other seven reporting `UNKNOWN`, which is the retry screen again. Classifying centrally also
+covers whatever gets added next.
+
+**A 401 does not arrive as one type.** Apple refusing the password is
+`InvalidCredentialsError`; a session restored *without* a password raises a bare
+`ValueError("No username or password specified")` several frames earlier, before anything is
+sent. Both mean the same thing to a user. `UnauthorizedError` does **not** join them: `request_pet`
+raises it when a second factor is being demanded — which the app answers with a code, not a
+sign-out — while CloudKit raises the same type for a genuine 401. Same class, opposite remedies.
+
+**And the line is who asked.** A user-initiated call — opening the iCloud list, renaming a tag,
+pressing refresh — sends them to sign in again, because they are watching and a silent no-op is
+worse than a screen. An automatic one — the periodic read, a read on resume — says so in the log
+and touches nothing: deleting somebody's session out from under whatever they are doing, from a
+job nobody asked for, is its own bug.
+
+Every one of these is tested twice: `WhichFailuresNeedAFreshSignInTest` on the JVM for the
+decision, `EveryPathAsksForAFreshSignInTest` on a device for each caller honouring it. A shared
+predicate does not stop a fourth screen being written that never asks.
+
+### 16. A green pull request here is often an empty one
+
+Two independent filters decide whether a workflow runs, and **a PR that matches neither reports
+as passing rather than as skipped.** Both have already happened, on the same day.
+
+**The base branch.** Every workflow that matters is gated `pull_request: branches: [ "main" ]` —
+`build-debug.yml`, `static-checks.yml`, `macos-scripts-python.yml`, and with them the APK build,
+the Chaquopy bridge tests, the JVM suite and the whole emulator suite. A PR opened against another
+branch, to stack a change on one still in review, matches none of those filters.
+
+**It does not report as skipped. It reports as green**, because the one workflow with no branch
+filter (`exporter-build-check.yml`) runs, passes, and is the only tick on the page. `gh pr checks`
+prints a single passing line and looks exactly like a small change with a small amount of CI.
+
+A change touching twelve Java files, four Python modules and six test classes sat on a PR based on
+another branch, with one green Windows-binary check and not one line of Java compiled anywhere.
+
+**The paths.** The same workflows are filtered to `app/**`, `scripts/**`, `gradle/**`,
+`pyrightconfig.json` and `.flake8`. **`.github/**` matches none of them**, so a change to the
+workflows themselves runs neither the build nor the static checks — and neither does a change to
+`docs/`, `AGENTS.md`, or `.claude/`. Merging does not rescue it either: the `push` trigger carries
+the same filters, so a workflow edit is first exercised by whoever next touches `app/`, which is a
+long way from the change that broke it.
+
+That one bit on a bump of four GitHub Actions across eight workflow files. The only check that ran
+was `exporter-build-check.yml`, and only because the PR happened to edit that file.
+
+**So check what actually ran before believing a PR is green**, and count the checks rather than
+reading the colour:
+
+```bash
+gh pr checks <pr>          # one line is not a passing build, it is an empty one
+gh pr view <pr> --json baseRefName
+```
+
+**For a change CI will not reach, run it by hand.** `build-debug.yml`, `static-checks.yml`,
+`check-adi-libraries.yml` and `update-contributors.yml` all carry `workflow_dispatch`, and it
+takes a ref — so the real jobs can be run against the branch before it merges:
+
+```bash
+gh workflow run "Generate APK (Debug)" --ref <branch>
+gh workflow run "Static checks" --ref <branch>
+```
+
+Stacking is still fine — base it on `main` anyway. The diff carries the other branch's commits
+until that merges, which is cosmetic and collapses on its own; a PR whose base is not `main` buys
+a tidier diff by not being tested.
+
+### 17. Do not carry this file's voice into anything a person reads
+
+**@parawanderer has not read this file**, nor most of `docs/`, most docstrings, or most commit
+messages. Agents wrote them. So an agent reading them cannot tell the maintainer's house style from
+its own predecessors' output, and by default assumes the former.
+
+These documents argue at length on purpose. The reader is a future agent deciding whether to undo a
+constraint it does not understand, and the argument is the payload.
+
+**A person reading a pull request review is a different job.** State the finding, the file and line,
+and the fix. The same goes for issue replies and anything else sent to a contributor or a reporter.
+
+### 18. When everything breaks at once, it is probably not yours
+
+On 2026-09-13 every sign-in failed with HTTP 503 from Grand Slam. An afternoon went into
+eliminating the serial, the device ids, the ADI provisioning, three networks, two Apple IDs, two
+machines and finally unmodified upstream FindMy.py — before anyone looked sideways.
+
+**The answer had been published two days earlier**, by AltStore, in
+[altstoreio/AltStore#1790](https://github.com/altstoreio/AltStore/pull/1790): Apple's edge refuses
+any POST to `gsa.apple.com/grandslam/GsService2` whose `X-MMe-Client-Info` names
+`com.apple.dt.Xcode`, before a credential is examined. It answers a 190-byte HTML page from
+`Server: Apple` rather than a GSA plist, which arrives as 503 and reads like an outage. Naming
+`com.apple.akd` — the daemon that really makes this call on macOS — is answered normally.
+
+```bash
+curl -so /dev/null -w '%{http_code}\n' -X POST --data-binary t \
+  -H 'X-MMe-Client-Info: <Mac14,2> <macOS;15.7.5;24G624> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>' \
+  https://gsa.apple.com/grandslam/GsService2      # 503
+
+  ... (com.apple.akd/1.0)> ...                    # 401, i.e. it arrived
+```
+
+**`check-gsa-edge.yml` now asks the edge daily and on every PR**, with exactly the headers the
+app and the exporter send, and opens an issue when one is refused. It would have caught this before
+the first report. `python scripts/check_gsa_edge.py` asks from your own connection.
+
+**So check the neighbours first.** This project shares an authentication path with AltStore,
+SideStore, Macless Haystack, OpenBubbles and every Anisette server, because they all copied it
+from the same place. When something that worked yesterday fails for everybody, half an hour
+reading those trackers is worth more than a day of bisecting this repository. The reverse holds
+too: a breakage only *our* users see is ours, and the neighbours will be quiet.
+
+**And instrument the call site, not one that looks like it.** The Xcode identifier was tested and
+cleared early — by patching the Anisette header builder, while `_gsa_request` sets
+`X-MMe-Client-Info` from `self._anisette.client` at a separate call site. The patched header never
+reached the wire, the request still failed, and that false negative sent the investigation away
+from the right answer for hours. A test that changes a value next to the one being sent proves
+nothing; print what actually goes out, or assert on the source line that composes it.
+
+### 19. The fork has pull requests too, and nobody is looking at them
+
+`parawanderer/FindMy.py` is where every Apple-protocol fix lands, and it accepts pull requests
+like any other repository. **Nothing in this project's routine surfaces them.** Notifications for
+a fork go to the fork, the tracker people watch is this one, and `gh pr list` run here shows
+nothing from there. So a contribution can sit open for days while the same problem is worked on
+from scratch in this repository.
+
+That is not hypothetical. On 2026-09-14 the GSA `429` was diagnosed from first principles over a
+day — eliminating the device identity, the network, the ADI provisioning and the headers one at a
+time — and the answer was already sitting in
+[parawanderer/FindMy.py#3](https://github.com/parawanderer/FindMy.py/pull/3), open since the 12th,
+with the same diagnosis and a working fix. A second pull request, #4, had been open just as long
+and was equally unseen.
+
+**So look, before starting.** It costs one command:
+
+```bash
+gh pr list --repo parawanderer/FindMy.py
+gh issue list --repo parawanderer/FindMy.py
+```
+
+Worth running before any investigation into Apple's protocol, before moving the pin (rule 14), and
+whenever something that worked yesterday stops working — which is the same moment rule 18 says to
+read the neighbours' trackers. The fork is the nearest neighbour of all, and the only one where
+somebody may have already written the patch.
+
+### 20. Look at the pictures. People report bugs in screenshots
+
+**This app's error messages arrive on a phone screen, so that is how they get reported.** The issue
+template has a log field and a "what happened" field, and both are routinely empty while a
+screenshot carries the entire diagnosis — because pasting a screenshot is one gesture and capturing
+a log is a menu, a file and a judgement about what to redact.
+
+**`gh` hands you the URL and not the picture, and nothing in the JSON says the picture mattered.**
+An `<img>` tag in a body reads as decoration next to prose, which is exactly when it is not. So a
+report whose fields are blank is not a report with nothing in it; it is one where everything is in
+the attachment.
+
+Download it, then read it. The `Read` tool renders an image, but only from a local path:
+
+```bash
+curl -sL -o /tmp/shot.png "https://github.com/user-attachments/assets/<id>"
+# then Read that path
+```
+
+**`.claude/skills/investigating-bug-reports/` has the whole procedure** — pulling the full thread
+including comments, listing every attachment *with the post and sentence it belongs to*, and
+reasoning about the cause only once all of it has been read. Use it for anything more involved than
+one screenshot on one body.
+
+**Earned on [#221](https://github.com/parawanderer/OpenTagViewer/issues/221)**, where the log field
+was empty and a reply was drafted asking the reporter to go and capture one. The screenshot already
+had it: the full `MobileMeDelegateError`, `status=1`, and the `status-message` string that
+identified the cause — which was neither of the two things guessed at before anyone looked. The
+cost of not looking is not a slower diagnosis, it is asking somebody to send you a thing they have
+already sent you, and then reasoning from a guess while you wait.
+
+**Three things follow once you are looking at them:**
+
+- **A screenshot is evidence, so read what it actually says rather than what the title says it
+  says.** The title on #221 named a symptom; the pixels named a status code and quoted Apple.
+- **Including when the evidence contradicts our own error text.** The app told that reporter the
+  problem was terms of service, because `classifyLoginFailure` maps every `MobileMeDelegateError`
+  to that. The response in the screenshot carried no `localizedError` at all, which is the channel
+  terms arrive on. A message a program prints is a hypothesis somebody wrote in advance; what the
+  server returned is the evidence, and they are allowed to disagree.
+- **Assume it holds personal data, and do not repeat it back.** Reporters redact unevenly — #221's
+  had a phone number blacked out by hand, and the pixels either side of it were not. Quote the
+  error text, never the surrounding screen, and never re-upload the image.
+
+### 21. Anisette comes from an emulated Mac, and it is one machine for the life of the install
+
+Since 2026-10-12 Apple issues the Find My token (`searchPartyToken`) only to a sign-in whose
+Anisette machine was minted by a Mac or an iPhone; an Android-minted one gets `mmeAuthToken` alone
+and every report fetch answers 401 ([malmeloo/FindMy.py#278](https://github.com/malmeloo/FindMy.py/issues/278)).
+From about 2026-10-20 the edge also answers 503 to any `X-MMe-Client-Info` whose OS token is
+`Android`, whatever else is sent ([#261](https://github.com/parawanderer/OpenTagViewer/pull/261)).
+So `LocalAnisette`'s Android libraries can no longer reach Find My by any combination of headers.
+
+`EmulatedMacAnisette` runs Apple's **macOS** CoreADI - the x86_64 build in iTunes 12.8.3 - under
+Unicorn, in `libmacadi.so` (`app/src/main/cpp/macadi/`, ported from sacca97/os-findmy-e; see its
+`NOTICE.md`). **A fresh sign-in gets it; a restored session keeps the machine that signed it in.**
+
+- **Never move an existing session onto the emulated Mac.** A session `LocalAnisette` signed in
+  before 2026-10-12 still fetches reports, and its token only works with Anisette from the Android
+  machine that obtained it (#248). Handing it the emulated Mac at restore downloads CoreADI,
+  provisions a new Mac at app start, and sends that Mac's `X-Apple-I-MD-M` beside the account's
+  Android `X-Mme-Device-Id` - a working session made to answer 401. `AnisetteForSession` decides,
+  from `SessionProvenance`: `LocalAnisette` for every session but the emulated Mac's own, and
+  `EmulatedMacAnisette.Purpose.RESTORE` for those, which **never provisions** - a Mac that lost its
+  store is not the machine that holds the token. `RestoringASessionOnTheMachineThatSignedItInTest`
+  pins it.
+- **Provenance has one home**: `sessionEstablishedLocally` in `LocalAnisette.PREFERENCES`, the key
+  every older install already has, plus `sessionMachine = emulatedMac` beside it for the Mac's
+  sessions. A new preferences file reads "nothing recorded" for every upgrader, which silently
+  turned off the machine-change warning in `_preferLocalAnisette`.
+- **`libmacadi.so` is loaded only in `:macadi`.** `MacAdiService` hosts the emulator and the app
+  reaches it over binder through `RemoteMacAdi`; nothing in the app process may touch `MacCoreAdi`,
+  whose static initialiser loads the library. Two reasons: a SIGSEGV from Unicorn or Apple's code
+  is a native crash no `catch` sees (rule 4, #232), and the GPL-2.0 emulator must stay a separate
+  program from the Apache-2.0 libraries and the map SDKs. A death during a call arrives as
+  `MacAdi.EmulatorDiedException`, is recorded per app version and library build, and the Mac is not
+  tried again until one of those changes. `OpenAirTagApplication` returns early in that process,
+  as it does in `:adiprobe`. `TheEmulatedMacInItsOwnProcessTest` checks the boundary for real.
+
+- **The library is fetched from Apple, never shipped.** One HTTP range request: in that exact disk
+  image the package payload is stored uncompressed and contiguous, so its offset is a constant.
+  `scripts/locate_mac_coreadi.py` re-derives and checks every constant, reading them from the Java
+  sources. Both the payload and the library are pinned by SHA-256, and the dispatcher offset
+  (`0x979A0`) is only valid for that one build.
+- **One identity, kept forever** - rule 11, with more at stake. `files/anisette/mac/identity.json`
+  and `store/` belong together: the library hashes the host UUID into the machine id, Apple binds
+  the provisioning to the device id, and the Find My token only works alongside Anisette from the
+  machine that obtained it. Apple will provision a device id **once** (a second attempt answers
+  HTTP 433 / -29002), so a lost store means a new machine and a new device-list entry.
+- **Never leave `adi.pb` in the store.** Provisioning writes the legacy whole-machine blob beside
+  the per-user one, and while it exists the library says "not provisioned". A process that
+  provisioned and then asked for headers sent Apple an empty machine id, which surfaces as
+  **`ec -80009`, "MID is invalid"** - and looked like an emulation fault until a restart, which
+  never reloads the file, made it go away. `CoreAdi::beginSession` drops it before every session.
+- **A Mac's device id is not a UUID**, and FindMy.py's CloudKit client parses it as one. The
+  keychain and CloudKit clients get `icloud_bridge._forCloudKit`'s view of the account instead,
+  which answers `device_uuid` with the host UUID and forwards everything else. Anything new that
+  hands the account to CloudKit has to go through it.
+- **Never freeze the emulated clock outside a byte-for-byte comparison.** A constant OTP is
+  accepted for about a minute and then refused.
+- **Grand Slam now asks for a second factor with `hsc` 409 and no `au`**, which the pinned
+  FindMy.py reads as "no 2FA needed". The fix belongs in FindMy.py's `_gsa_authenticate`
+  (`_normalize_2fa_status`, as malmeloo/FindMy.py#279 has it). Until the pin reaches a commit with
+  it, `main._treatHsc409AsSecondFactor` fills `au` in by wrapping `_gsa_request`, and it steps aside
+  by itself once FindMy.py has the function. `test_the_pinned_findmy_does_not_yet` fails on the
+  pin move, which is the cue to delete the wrapper.
+- **The APK carries GPL-2.0 code** (Unicorn). Keep it in `libmacadi.so`, not in
+  `libopentagviewer.so`, and keep its obligations met: `assets/licences/unicorn/` carries the
+  licence files and a notice naming the exact source (`UnicornNoticeTest` keeps it in step with
+  `MacAdi.cmake`), and `build-release.yml` attaches that source tarball to every release.
+- **The C++ port is checked against os-findmy-e's Rust byte for byte**, offline:
+  `scripts/adi-emulator-diff/compare-libmacadi.sh`, in `macadi-host.yml`. Change `vm.cpp`,
+  `core_adi.cpp` or `macho.cpp` and that job is what says whether the port still matches.
+
+The emulator suite's sign-in tests cannot cover any of this - they swap the Anisette source for a
+fake. What does: the JVM tests (`EmulatedMacAnisetteTest`, `MacIdentityTest`,
+`MacProvisioningTest` against `FakeGrandSlam`, `RestoringASessionOnTheMachineThatSignedItInTest`,
+the fetcher's), `macadi-host.yml` (the library loads in the ported emulator, and matches adi-core),
+`TheEmulatedMacInItsOwnProcessTest` on the device, the Python tests in `test_emulated_mac.py`, and a
+real sign-in on a phone.
+
+---
+
+## Building and testing
+
+See **[CONTRIBUTING.md](./CONTRIBUTING.md)** for setup and every test suite. Short version:
+
+```bash
+./gradlew testAll           # everything that needs no device
+./gradlew testAllOnDevice   # the above plus instrumented tests
+```
+
+**Instrumented tests run on a Gradle managed device.** Nothing needs to be booted first —
+Gradle provisions the emulator, runs the tests, and destroys it:
+
+```bash
+./gradlew :app:testEmulatorDebugAndroidTest    # 580 tests, about twelve minutes
+```
+
+Use this rather than `connectedDebugAndroidTest`. The Android Gradle Plugin holds its ADB
+connection inside the Gradle daemon and reuses it between invocations, so once a hand-started
+emulator's adb daemon goes stale, the next run fails to install or hangs — with an error that
+has nothing to do with the code. Recovering from that needs *both* an emulator restart and
+`./gradlew --stop`, because restarting only the emulator leaves the daemon holding the dead
+bridge. A managed device is created fresh per run, so nothing survives to go stale. It is
+also the only form of this that CI can run unattended.
+
+#### The run sits in `testEmulatorDebugAndroidTest` and never starts a test
+
+**Check the lock count first.** It is a one-line fix and it looks like four other things:
+
+```bash
+cat ~/.android/avd/gradle-managed/active_gradle_devices    # e.g. "MDLockCount 4"
+adb devices                                                # no managed AVD listed
+```
+
+If the count is above zero with no run in flight, that is the fault. Stop the daemons, delete
+the file, run again — AGP recreates it and there is nothing in it worth keeping:
+
+```bash
+./gradlew --stop
+rm ~/.android/avd/gradle-managed/active_gradle_devices
+```
+
+**Why it happens:** AGP counts the managed devices it has in flight in that file, and a run that
+is interrupted rather than finished never gives its slot back. Each `Ctrl-C`, each killed
+background job, each IDE stop button adds one. Once the count reaches the concurrency limit the
+next run waits for a slot that nothing will ever release.
+
+**Why it is worth a heading:** it boots *no emulator at all* and prints nothing while waiting, so
+for the first ten minutes it is indistinguishable from a device starting slowly, and after that
+from every other reason a run can hang. Three runs were abandoned here diagnosing it as port
+contention with a hand-started emulator — which it was not, and `adb devices` said so the whole
+time by listing no managed AVD.
+
+**So prefer letting a run finish over killing it**, and when you do kill one, clear the count in
+the same breath rather than meeting it on the next run.
+
+Two other hangs with the same symptom, so rule them in or out by what they leave behind:
+
+| What you see | What it is |
+| --- | --- |
+| No managed AVD in `adb devices`, no test output | the leaked lock above |
+| A managed AVD is up, tests ran and then stopped mid-suite | the device died — check `adb logcat -b crash`; the emulator's Bluetooth stack aborting has done this here |
+| `connectedDebugAndroidTest` fails to install, or hangs immediately | stale ADB bridge in the daemon — needs *both* an emulator restart and `./gradlew --stop` |
+
+Three consequences worth knowing:
+
+- The `aosp-atd` image carries no Play Services, so **a test that touches Maps will not run
+  on it** — that device would need a `google` image. Nothing today does.
+- **Espresso only works on the managed device.** A guest window has focus only while the
+  emulator's own window has focus on the host desktop, so against a hand-started emulator any
+  UI test fails with `RootViewWithoutFocusException` the moment you alt-tab away. There is
+  nothing to fix in the test when that happens — run it on the managed device.
+- `./gradlew testDebugUnitTest` runs **181 JVM tests in about fifteen seconds**, and is worth
+  running constantly while working on anything it covers: the pure logic. Refresh policy, scan
+  order, marker focus, the long-fetch banner, passcode parsing, the CSV and zip writers,
+  coordinate conversion. Anything that needs neither Android nor a device belongs there, not on
+  the emulator — it is two orders of magnitude faster to run.
+
+  It is still **not** the suite to report "tests pass" from. Every screen, every repository and
+  the whole Python bridge are instrumented, so a green JVM run says nothing about them.
+
+### Writing an Espresso test that is not flaky
+
+**Never call `onView(...)` bare when the screen may still be settling, and never retry a click
+until it stops throwing.** Both mistakes pass on a fast machine and fail in CI, which is how
+this repo went red three runs in a row.
+
+Use `Eventually` (in `app/src/androidTest/.../Eventually.java`). It has exactly two methods,
+and picking the wrong one is the bug:
+
+| | Use for | Why |
+| --- | --- | --- |
+| `Eventually.check(() -> …)` | assertions, and waiting for a view to appear | Espresso waits for the main thread to go idle and **nothing else**; every step in this app runs on an Rx scheduler and hops back, so a check made the instant a click returns asks about work that has not started |
+| `Eventually.perform(what, tookEffect, () -> …)` | **anything that changes the screen** | see below |
+
+`perform` exists because retrying-until-no-exception cannot tell two opposite things apart:
+
+- the tap **missed** — the soft keyboard was still over the button — and must be retried
+- the tap **worked**, and what it started has already torn the screen down, so Espresso throws
+  `NoActivityResumedException` from the very same call
+
+Retrying the second turns one success into fifty failures. Only the test knows what "it
+worked" means, so it says — usually by asking a fake what it was called with:
+
+```java
+Eventually.perform("the sign in button", () -> apple.timesCalled("login") > 0,
+        () -> onView(withId(R.id.login_button_main)).perform(click()));
+```
+
+Two more rules that came out of the same failures:
+
+- **`perform`'s predicate runs *before* the first attempt, so it must be cheap when the answer
+  is "not yet".** It is asked once up front, then twice per retry. A predicate phrased as "is
+  the dialog up?" runs `inRoot(isDialog())` against a screen with no dialog, and Espresso's
+  root picker retries internally for seconds before admitting there isn't one — so the cheap
+  case is the slow one, fifty times over. Seven tests in `UnlinkTheAccountSettingTest` took
+  **6m 33s**; asking a repository instead took **19s**. Prefer a fake's call count or a stored
+  value. And do not reach for `perform` at all unless the action might tear the screen down —
+  a click that opens a dialog cannot, so `Eventually.check` then a plain `perform(click())` is
+  both correct and instant.
+- **One `ViewAction` per `perform` when the action might finish the flow.**
+  `perform(replaceText(code), closeSoftKeyboard())` fails on the *second* action, because the
+  first one completed the sign-in and there is no activity left to close a keyboard on.
+- **A `GONE` view still matches `withId`.** "Not on screen" is `matches(not(isDisplayed()))`,
+  never an expected `NoMatchingViewException`.
+- **`isEnabled()` on a popup menu item asks the wrong view.** `withText` finds the `TextView`
+  inside the row, and that reports itself enabled whatever the `MenuItem` says — so
+  `not(isEnabled())` passes for an item that is fully enabled, and the assertion proves nothing.
+  The state is on the containing `ListMenuItemView`:
+  `allOf(withClassName(endsWith("ListMenuItemView")), hasDescendant(withText(…)))`. Pair it with
+  a positive case using the same matcher, or you cannot tell a correct disabled item from a
+  matcher aimed at nothing. `ArrangingTheTagListTest` does both.
+- **`replaceText`, not `typeText`, for any field that moves focus as it fills.** The 2FA code
+  boxes and the bundle passcode groups both advance when full, and Espresso's per-character
+  typing fails the moment the field it started on stops being focused. It is also the case
+  people actually hit: a code is pasted far more often than typed.
+
+#### `animationsDisabled` does not disable animations
+
+It reads like it settles the question. It does not: AGP passes `--no-window-animation` to
+`am instrument`, which zeroes the *window* and *transition* scales and leaves
+`animator_duration_scale` — the one `ViewPropertyAnimator` and `ObjectAnimator` obey — exactly
+as the device had it. Animators in the app can and do run at full speed under test.
+
+So **no view's final state may be set in an animation callback.** `StepTransition`, which
+animates the sign-in steps, is the worked example: every visibility, offset and alpha it
+touches is at its final value before the call returns, and the animation only decorates the
+journey there. A screen whose state is readable only once an animation has ended cannot be
+asserted on without sleeping, and `Eventually` is a retry loop, not a fix for that.
+
+Two things fall out of it that are easy to get wrong:
+
+- **Animating a step out is not free.** These containers are siblings in a vertical
+  `LinearLayout`, so one still fading occupies its height and the arriving one is laid out
+  *below* it, then jumps when the old one finally goes. It reads as a snapping bug, not as a
+  slow fade. Only the arriving step animates; cross-fading them needs a `FrameLayout`.
+- **Do not read the animator scale to decide what a test expects.** It is a global, and by the
+  time this suite reaches any one class something earlier has already turned animators off.
+  `StepTransitionTest` sets the scale it needs per test, through reflection, and puts it back.
+
+That test also pins down that Settings → Accessibility → **Remove animations** is honoured —
+the flow stops moving entirely rather than moving quickly, which is the point of the setting.
+
+### Looking at the UI yourself
+
+A visual change should be looked at, not reasoned about. `SystemColorsLayoutTest` shows the
+pattern: inflate a layout, or load a drawable, against a themed context, draw it to a bitmap,
+and write it to the directory AGP passes as `additionalTestOutputDir`. It comes back to the
+host in `app/build/outputs/managed_device_android_test_additional_output/`, and the managed
+device runs headless, so no window and no emulator of your own is needed.
+
+Then compact them before reading — a raw 1080px screenshot is mostly whitespace:
+
+```bash
+python .claude/skills/device-screenshots/sheet.py <output-dir> <somewhere-temporary>
+```
+
+**A screenshot is not an assertion.** It shows what one configuration looked like once. Assert
+the thing that matters as well — a resolved colour, a contrast ratio, a measured height — and
+be careful what the assertion is about: the screenshot test kept passing while the history
+timeline was invisible, because it loaded the drawables with a theme and the app did not.
+
+Full details, including forcing dark mode without touching the device: `.claude/skills/device-screenshots/`.
+
+### Showing a UI test to a person
+
+A UI test runs at machine speed — a whole sign-in is over in about three seconds and looks
+like a flicker. **When someone asks to watch a flow, do not just run it: it will be over
+before they look up.** Run it in slow motion, on a device with a window:
+
+```bash
+ANDROID_SERIAL=emulator-5554 ./gradlew :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.slowMotion=1500 \
+  -Pandroid.testInstrumentationRunnerArguments.class=dev.wander.android.opentagviewer.AppleLoginFlowTest#signingInWithATextedCodeReachesTheMap
+```
+
+> [!WARNING]
+> **`connectedAndroidTest` uninstalls the app when it finishes.** Both APKs are removed, so
+> everything the app stored on that device is gone: the signed-in session, all settings
+> including a hand-registered AMap key, and every imported beacon and its location history.
+> `allowBackup` is false, so on a real phone that is unrecoverable and means redoing the macOS
+> export. **Only ever point this at a throwaway emulator**, tell the user it will wipe that
+> device, and never at a phone with real data — `ANDROID_SERIAL` pins the target, so set it.
+> The tests also overwrite settings while they run; `DeviceStateGuard` puts those back, but
+> nothing puts back an uninstall.
+
+Four prerequisites, and it silently does nothing useful without them:
+
+1. **`connectedDebugAndroidTest`, not the managed device.** The managed device is headless —
+   there is nothing to see. This is the one case where it is the wrong task.
+2. **An emulator with a window must already be running**, and `ANDROID_SERIAL` pinned to it so
+   the run cannot install onto a physical phone. Ask the user to start it rather than starting
+   one yourself; they may already have one, and two emulators fight over `emulator-5554`.
+3. **Its window must keep focus on the host desktop.** Espresso will not touch an unfocused
+   window, so clicking away mid-run fails the test with `RootViewWithoutFocusException`. Say
+   so before starting.
+4. **`slowMotion` is a number of milliseconds** and defaults to off, so a normal run and CI are
+   unaffected. 1000–1500 is comfortable to follow. See `TestPace`, and call
+   `TestPace.afterAStep()` after each visible step in any new UI test.
+
+Pick a single `#method` rather than a class. A whole class replays the same screens over and
+over, which is longer without showing more.
+
+`scripts/run_instrumented_tests.sh` wraps the same task with retries, and only retries when a
+run failed *before* any test reported — a suite that ran and failed is reported as-is rather
+than repeated. `GRADLE_TASK=:app:connectedDebugAndroidTest` switches it to a hand-started
+emulator, where it pins `ANDROID_SERIAL` so a run cannot install to a physical phone.
+
+Python must be on `PATH` — the build shells out to it to generate the unicorn stub wheel.
+
+**Type-check Python with pyright, not mypy.** The editors used here run Pylance, which is
+pyright; default mypy is far more lenient and will pass code your editor flags.
+
+```bash
+python -m pyright app/src/main/python/main.py
+```
+
+## Adding user-facing strings
+
+The app ships ten locales. A string missing from one of them silently falls back to English
+for those users — the build succeeds, and it looks fine in whichever language you speak. Use
+the helper rather than editing ten files:
+
+```bash
+python scripts/add_strings.py                 # prints full usage and the input format
+python scripts/add_strings.py --locales       # which locales exist, discovered from the tree
+python scripts/add_strings.py new.json        # add strings to every locale
+python scripts/add_strings.py --fill new.json # add only where missing, for back-filling
+python scripts/add_strings.py --show <name>…  # print current text, in the input format
+python scripts/add_strings.py --replace r.json # reword strings that already exist
+python scripts/add_strings.py --remove <name>… # delete strings from every locale
+python scripts/add_strings.py --check         # fail if any locale is missing a string
+```
+
+**Rewording an existing string goes through `--show` and `--replace`, never ten hand edits.**
+
+```bash
+python scripts/add_strings.py --show anisette_upgrade_message > reword.json
+# edit reword.json
+python scripts/add_strings.py --replace reword.json
+```
+
+Two reasons this is the rule. A missed locale keeps the old wording and still passes
+`--check`, so nothing complains and the app says two different things in two languages. And
+the intermediate JSON puts all ten translations in one reviewable diff, instead of ten
+separate edits nobody reads to the end.
+
+**Deleting goes through `--remove`, and renaming is `--remove` followed by an ordinary add.**
+
+```bash
+python scripts/add_strings.py --remove export_tag
+```
+
+The same argument applies: a string missed in one locale is still valid XML and still passes
+`--check`, so an orphan sits there indefinitely. `--remove` refuses names that exist nowhere,
+so a typo fails loudly. It does **not** update references — if a layout or menu still points
+at a removed string, aapt fails the build, which is the intended way to find out.
+
+Translations are read **from a JSON file, never from a command-line argument**. That is not
+a style preference: passing non-ASCII text through shell quoting has twice corrupted it here,
+once putting a literal `\&#8217;` on screen where a French apostrophe belonged.
+
+**Write the JSON exactly as the text should appear on screen, and do not escape anything.**
+The tool escapes apostrophes, quotes and ampersands for you, and preserves the inline tags
+`<u>`, `<b>` and `<i>`. A `'` you escape yourself arrives on screen as `\'`. This is settled —
+do not go and re-read the script to check it before every batch of strings.
+
+It also refuses to write unless every locale is supplied, and re-parses each file afterwards
+so a malformed write fails immediately rather than at aapt time. Locales are discovered from
+`app/src/main/res/values-*/strings.xml`, so adding a locale directory makes it required with
+no change to the script.
+
+`--check` is worth running before opening a PR; it found eight strings missing across seven
+locales the first time it was run. It also runs in CI, on every PR and every release.
+
+### Pre-commit hook
+
+`.githooks/pre-commit` runs the translation check, flake8 and pyright over whichever Python
+files are staged, the Java import check when Java is staged, and refuses a commit that stages
+`secrets.properties`. Hooks are not
+versioned, so each clone has to opt in once:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+It deliberately does not build or run tests. A hook that takes a minute gets bypassed with
+`--no-verify` within a day, and a hook people routinely bypass is worse than none, because it
+looks like a safety net that is not there. Use `--no-verify` when you genuinely need to.
+
+## Install the GitHub CLI
+
+If you are working with an agent, install and authenticate [`gh`](https://cli.github.com/):
+
+```bash
+gh auth login
+gh auth status
+```
+
+It is the difference between an agent that can only guess at a red build and one that can
+read it. Without `gh`, a failing check is a coloured square on a web page the agent cannot
+see; with it, the agent can find the failing step, read the log, fix the cause and say what
+it was. The same applies to triaging issues before changing anything.
+
+```bash
+gh pr checks <pr>                       # which checks passed, failed, are pending
+gh run list --limit 5                   # recent runs
+gh run view --job <id> --log-failed     # the failing output, once the run has finished
+gh issue list --state all --limit 100   # is this already reported?
+gh issue view <n> --comments            # the discussion, which often has the diagnosis
+```
+
+**While a run is still in progress, `--log-failed` refuses**, reporting only that logs will
+be available when the run completes — unhelpful when one job failed in seconds and another
+has half an hour of emulator left. The step-level API answers immediately and tells you
+exactly which step died:
+
+```bash
+gh api repos/<owner>/<repo>/actions/jobs/<id> \
+  --jq '.steps[] | "\(.conclusion // .status)\t\(.name)"'
+```
+
+Note that `gh`'s authentication is separate from git's. `gh` can be logged in while
+`git push` still fails, if the remote is HTTPS with no cached credential or SSH with a
+passphrase-protected key and no agent running. `gh` will still work for everything above.
+
+## Windows traps
+
+Each of these has already produced a hang that looked like something else:
+
+- **`python3` is usually a trap.** It resolves to a zero-byte Microsoft Store alias in
+  `%LOCALAPPDATA%\Microsoft\WindowsApps\` which hangs forever when run non-interactively
+  rather than failing. Prefer `python`; reject candidates whose file length is zero.
+- **Git Bash rewrites POSIX paths.** `adb push ... /sdcard/Download/` becomes
+  `C:/Program Files/Git/sdcard/...`. `MSYS_NO_PATHCONV=1` fixes that but *also* ~~stops~~
+  `JAVA_HOME` being translated, so `gradlew.bat` gets a POSIX path and dies. Never set it
+  globally.
+- **adb appears to hang from Git Bash** on `start-server`, because MSYS waits on the
+  daemon's inherited handles. Use PowerShell, or have Android Studio open — it runs its own
+  adb server.
+- **A gradle command that seems to hang is usually the environment, not the build.** Never
+  wrap one in a `grep` or a `timeout` that can swallow the error message — that turns a fast,
+  legible failure into an apparent hang. `JAVA_HOME` pointing below 17 is the usual culprit,
+  and it fails deep inside the Android Gradle Plugin with a message that reads like a plugin
+  bug.
+
+## Conventions
+
+- Java, not Kotlin, in `app/`. Match the surrounding style.
+- Entities use Lombok `@Builder`; construct them that way.
+- Comments explain *why*, especially where behaviour looks wrong but is forced by Apple's or
+  FindMy.py's API.
+- User-facing strings go in `values/strings.xml` with translations in every supported locale.
+  **Use `scripts/add_strings.py` rather than editing the files by hand** — see below.
+- Prefer fixing the root cause to adding a workaround.

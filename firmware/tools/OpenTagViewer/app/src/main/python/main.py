@@ -1,0 +1,2431 @@
+from enum import Enum
+from typing import Any, NamedTuple, cast
+import json
+import os
+import time
+import traceback
+from datetime import datetime, timedelta, timezone
+from io import BytesIO
+import base64
+import NSKeyedUnArchiver
+
+from findmy import FindMyAccessory, MobileMeDelegateError
+from findmy.errors import AppleServiceUnavailableError, GrandSlamRefusedError
+from findmy.accessory import FixedRollingKeyPairAccessory
+from findmy.keys import KeyPairType
+from findmy.reports import (
+    RemoteAnisetteProvider,
+    AppleAccount,
+    LoginState,
+    SmsSecondFactorMethod,
+    TrustedDeviceSecondFactorMethod,
+)
+from findmy.reports.anisette import (
+    CLIENT_IDENTITY,
+    CLIENT_SERIAL,
+    BaseAnisetteProvider,
+)
+from findmy.util import files as util_files
+from findmy.reports.twofactor import (
+    SyncSecondFactorMethod
+)
+
+import identity as app_identity
+from findmy.reports import account as _findmy_account
+
+_FINDMY_READS_HSC_409 = hasattr(_findmy_account, "_normalize_2fa_status")
+"""Whether the pinned FindMy.py reads `hsc` 409 as a second factor itself. See
+`_treatHsc409AsSecondFactor`."""
+
+
+class TwoFactorMethods(Enum):
+    UNKNOWN = 0
+    TRUSTED_DEVICE = 1
+    PHONE = 2
+
+
+def _toUnixEpochMs(dt: datetime | None) -> int | None:
+    """
+    Convert datetime to unix epoch (milliseconds)
+    """
+    if dt is None:
+        return None
+    return int(dt.timestamp() * 1000)
+
+
+def foo(arg: str):
+    """For testing..."""
+    print("Bar!")
+    print(f"The arg was: '{arg}'")
+
+    for i in range(10):
+        print(f"Hello {i}!")
+
+    print("Done!")
+
+    return {
+        "Some": "Dictionary",
+        "key": [1, 2, 3],
+        "other": False,
+        "and": True,
+        "nested": {
+            "a": "b",
+            "c": "d"
+        },
+        "set": {"a", "b", "c"},
+        "floats": 1.123456,
+        "null maybe": None
+    }
+
+
+def decodeBeaconNamingRecordCloudKitMetadata(cleanedBase64: str) -> dict | None:
+    """
+    Extract some extra information from within the plist file `cloudKitMetadata` node
+    (that is followed by a `<data>` element containing base64)
+
+    Note that `cleanedBase64` must not contain line breaks `\\n`, or tabs `\\t`
+    or other whitespace characters that get introduced by some plist parsers
+
+
+    ### More info:
+
+    The most popular java plist parser, the google java
+    [dd-plist](https://mvnrepository.com/artifact/com.googlecode.plist/dd-plist) library,
+    [does not currently support the `NSKeyedArchiver` plist format](https://github.com/3breadt/dd-plist/issues/70)
+    (at the time of writing).
+
+    However somebody has managed to create a parser in python: https://github.com/avibrazil/NSKeyedUnArchiver
+
+    So because there's some interesting data to be extracted from this `NSKeyedArchiver`-encoded data,
+    we will extract it using python via this nice library and pass the needed data back to Java
+
+    See:
+    - https://www.mac4n6.com/blog/2016/1/1/
+      manual-analysis-of-nskeyedarchiver-formatted-plist-files-a-review-of-the-new-os-x-1011-recent-items
+    - https://github.com/malmeloo/FindMy.py/issues/31#issuecomment-2628072362
+    - https://github.com/3breadt/dd-plist/issues/70
+
+    """
+    try:
+        data = base64.b64decode(cleanedBase64)
+        d_dict = NSKeyedUnArchiver.unserializeNSKeyedArchiver(data)
+
+        # This is actually a pretty large object, but very little of the data seems useful to our app
+
+        RecordCtime: datetime | None = d_dict.get("RecordCtime", None)
+        RecordMtime: datetime | None = d_dict.get("RecordMtime", None)
+        ModifiedByDevice: str | None = d_dict.get("ModifiedByDevice", None)
+
+        res = {
+            "creationTime": _toUnixEpochMs(RecordCtime),
+            "modifiedTime": _toUnixEpochMs(RecordMtime),
+            "modifiedByDevice": ModifiedByDevice
+        }
+
+        print(f"Computed result: {res}")
+
+        return res
+
+    except Exception:
+        print(f"Failed to parse due to {traceback.format_exc()}")
+        return None
+
+
+def _convertToJavaDictWrapper(method: SyncSecondFactorMethod) -> dict[str, Any]:
+    # Deliberately heterogeneous: it carries the method object plus the ints and strings
+    # the Java side reads back out. Without the annotation the type is inferred from the
+    # first entry alone, and every later assignment looks like an error.
+    return_obj: dict[str, Any] = {
+        "obj": method
+    }
+
+    print(f"The input is {method} of class {type(method)}")
+
+    if isinstance(method, TrustedDeviceSecondFactorMethod):
+        print("Option: Trusted Device 2FA method")
+
+        return_obj["type"] = TwoFactorMethods.TRUSTED_DEVICE.value
+
+    elif isinstance(method, SmsSecondFactorMethod):
+        print(f"Option: SMS ({method.phone_number})")
+
+        return_obj["type"] = TwoFactorMethods.PHONE.value
+        return_obj["phoneNumber"] = method.phone_number
+        return_obj["phoneNumberId"] = method.phone_number_id
+
+    else:
+        print(f"Unmapped 2FA method! (type: {type(method)})")
+
+        return_obj["type"] = TwoFactorMethods.UNKNOWN.value
+
+    return return_obj
+
+
+LOGIN_TIMEOUT_SECONDS = 30
+"""
+How long a single request to Apple may take.
+
+FindMy.py defaults to five seconds total per request, which suits a desktop on a good connection
+and does not suit a phone. Signing in is several round trips measured separately, and there may
+be an Anisette server in the middle generating its data on demand.
+
+**Thirty, to match the other half of the same sign-in.** `AdiProvisioning` already uses thirty
+second connect and read timeouts for the exchange it makes with Apple directly, and it is the
+same network at the same moment - so the two halves having different patience only meant that
+whichever ran second was the one that failed.
+
+Measured rather than guessed: a login on an emulator with roughly 500ms round trips to Apple, and
+a site-local IPv6 address that routes nowhere, spent its whole five second budget inside
+happy-eyeballs and arrived as a bare `TimeoutError`. Provisioning survived the identical network.
+"""
+
+
+class LocalAnisetteProvider(BaseAnisetteProvider):
+    """Anisette produced on this device, rather than by somebody else's server.
+
+    Apple's ADI libraries are native Android code, so there is no reason a login has to be
+    relayed through a public Anisette server - which sees the traffic, and takes the app down
+    with it when it goes offline.
+
+    The base class does almost all the work: it builds every header itself and only asks a
+    provider for two values. Both come from Java, where the libraries are loaded and ADI is
+    provisioned (see the `anisette` package).
+
+    It serializes as the *remote* provider, on purpose. FindMy embeds the anisette provider in
+    the account state it exports, but this one has nothing worth embedding - the ADI state
+    lives in app storage, not in the account. Writing the remote server's URL instead means an
+    exported login stays restorable anywhere, including by app versions that have never heard
+    of local Anisette, and by this app when local Anisette is unavailable. Whether Anisette
+    came from here or from a server is a transport detail, not part of the account.
+    """
+
+    def __init__(self, bridge: Any, fallbackServerUrl: str, **identityKwargs: Any) -> None:
+        # Whatever identity the caller decides - the app's for a new sign-in, and the one the
+        # restored account already had when this is replacing a rebuilt provider. Defaulted to
+        # nothing rather than to the app's, so that a path which forgets to say inherits
+        # FindMy.py's default and costs nobody a re-login, instead of silently re-identifying
+        # an existing session.
+        super().__init__(**identityKwargs)
+        self._bridge = bridge
+        self._fallbackServerUrl = fallbackServerUrl
+
+    @property
+    def otp(self) -> str:
+        return self._said("one-time password", str(self._bridge.otp()))
+
+    @property
+    def machine(self) -> str:
+        return self._said("machine id", str(self._bridge.machine()))
+
+    def _said(self, what: str, value: str) -> str:
+        """Pass the value on, saying why when Java had none.
+
+        Empty is still what goes to Apple - the contract is not to throw into a login - but
+        Apple's answer to it is only `ec -80009`, which names no cause. The reason is in Java.
+        """
+        if not value:
+            print(f"Local Anisette produced no {what}: {self._bridge.unavailableReason()}")
+        return value
+
+    @property
+    def router(self) -> str:
+        """`X-Apple-I-MD-RINFO`, from Java rather than FindMy.py's Android constant.
+
+        The emulated Mac is provisioned under a routing number Apple assigns, and has to present
+        that one. A bridge without the method - an older fake in a test - keeps the library's.
+        """
+        router = getattr(self._bridge, "router", None)
+        if router is None:
+            return super().router
+        return str(router())
+
+    def to_json(self, dst=None, /):
+        """Deliberately the remote mapping - see the class docstring.
+
+        **Everything the session was established with has to be in here.** This mapping is the
+        whole of what a restored session is rebuilt from, so a field left out is not "defaulted",
+        it is *reverted* - and silently, on a session Apple has already bound to the value that
+        was dropped.
+
+        That is not hypothetical: writing only the type and the URL meant a session established
+        as this app's serial came back as FindMy.py's `0FINDMYPY001` on the next launch, and one
+        established as a MacBookPro13,2 came back as a MacBookPro18,3. Two names and two machines
+        for one session, which is exactly what rule 11 exists to prevent.
+
+        Written only when it differs from the library's own default, matching what
+        `RemoteAnisetteProvider.to_json` does - so a bundle from a version that imposed nothing
+        stays byte-identical.
+        """
+        state: dict[str, Any] = {
+            "type": "aniRemote",
+            "url": self._fallbackServerUrl,
+            # Carried even though nothing here spends it: a restored session is rebuilt from
+            # this mapping, and omitting it would hand it back the five second default.
+            "timeout": LOGIN_TIMEOUT_SECONDS,
+        }
+
+        if self.serial != CLIENT_SERIAL:
+            state["serial"] = self.serial
+        if self.identity != CLIENT_IDENTITY:
+            state["identity"] = self.identity.to_json()
+
+        return util_files.save_and_return_json(state, dst)
+
+    @classmethod
+    def from_json(cls, val):
+        # Never reached: nothing is ever serialized as this type. Restoring picks the local
+        # provider up again through _anisetteProvider, not through deserialization.
+        raise NotImplementedError(
+            "LocalAnisetteProvider is never serialized under its own type"
+        )
+
+    async def close(self) -> None:
+        pass
+
+
+def _anisetteProvider(anisetteServerUrl: str, localAnisette: Any = None, **identityKwargs: Any):
+    """Prefer this device, fall back to the configured server.
+
+    The fallback is not a nicety. Apple can change their libraries at any time, the download
+    needs network the first time, and the whole mechanism is an optimisation over something
+    that already works - so anything going wrong here has to degrade to the old behaviour
+    rather than fail a login.
+
+    **The identity is the caller's to supply, and both branches get the same one.** Which kind
+    of Anisette produced a session is a transport detail; a user whose local Anisette fell back
+    to a server must not thereby become a different machine, because that is a re-login and a
+    second device-list entry for something they did not do.
+    """
+    if localAnisette is not None:
+        try:
+            if localAnisette.ensureReady():
+                print(f"Using local Anisette: {localAnisette.describe()}")
+                return LocalAnisetteProvider(localAnisette, anisetteServerUrl, **identityKwargs)
+            print(
+                "Local Anisette unavailable, using the remote server instead: "
+                f"{localAnisette.unavailableReason()}"
+            )
+        except Exception:
+            print(f"Local Anisette failed, using the remote server: {traceback.format_exc()}")
+
+    # Passed here rather than through identityKwargs, which also reach LocalAnisetteProvider -
+    # BaseAnisetteProvider takes no timeout, and there is no HTTP in the local one to spend it on.
+    return RemoteAnisetteProvider(
+        anisetteServerUrl, timeout=LOGIN_TIMEOUT_SECONDS, **identityKwargs)
+
+
+def loginSync(email: str, password: str, anisetteServerUrl: str,
+              localAnisette: Any = None) -> dict:
+    # Bound before the try so the failure path can tell "no account was ever built" from "the
+    # account exists and the exchange after authentication failed" - which is the terms case,
+    # and the one where the account is still worth something.
+    acc: AppleAccount | None = None
+
+    try:
+        # A new sign-in, so this is the one place the app's own identity is used. Everything
+        # restored from a stored account keeps whatever it was established with - see
+        # identity.identityForRestore, and the warning on identity.LEGACY_SERIAL.
+        #
+        # The machine half comes from Java, which persists it per install: an install from
+        # before there was a choice keeps the Mac its ADI was provisioned with, and a fresh one
+        # is an iPhone. Passed even when local Anisette turns out to be unusable, because a
+        # sign-in relayed through a server must still claim the same machine.
+        anisette = _anisetteProvider(
+            anisetteServerUrl,
+            localAnisette,
+            **app_identity.identityForNewSession(localAnisette),
+        )
+        # And the two ids the same install already used when it provisioned ADI, so this is one
+        # device rather than two that happen to share a serial. Empty when Java cannot say, in
+        # which case FindMy.py mints its own pair exactly as it always did.
+        # The account and the Anisette provider hold separate sessions, so both need this:
+        # the Anisette fetch happens inside the login but from the provider's own client.
+        acc = AppleAccount(
+            anisette,
+            timeout=LOGIN_TIMEOUT_SECONDS,
+            **app_identity.deviceIdsForNewSession(localAnisette),
+        )
+        _treatHsc409AsSecondFactor(acc)
+
+        state = acc.login(email, password)
+
+        # Which Anisette established this session decides whether continuing it against the
+        # other kind will still be recognised by Apple - the machine identity differs between
+        # them. Recorded on every login, including remote ones, so it cannot go stale.
+        if localAnisette is not None:
+            localAnisette.recordSessionProvenance(
+                isinstance(anisette, LocalAnisetteProvider)
+            )
+
+        if state == LoginState.REQUIRE_2FA:  # Account requires 2FA
+            methods = acc.get_2fa_methods()
+
+            named_methods_list = []  # create a map for use in Java...
+            for method in methods:
+                named_methods_list.append(
+                    _convertToJavaDictWrapper(method)
+                )
+
+            # Java needs to show us a nice UI
+            # where we can select how we want to auth...
+            return {
+                "account": acc,
+                "loginState": state.value,
+                "loginMethods": named_methods_list
+            }
+
+        # Any of the other cases. I'm not sure if this can even happen...
+        return {
+            "account": acc,
+            "loginState": state.value,
+            "loginMethods": None
+        }
+
+    except Exception as e:
+        print(f"Failed to log in due to error: {traceback.format_exc()}")
+
+        reason = classifyLoginFailure(e)
+        failure: dict[str, Any] = {
+            "error": describeLoginFailure(e),
+            "reason": reason,
+        }
+
+        # Absent rather than zero when Apple did not say, because zero reads as "retry now".
+        wait = appleAskedToWait(e)
+        if wait is not None:
+            failure["retryAfterSeconds"] = wait
+
+        # **The account survives a terms failure, and only a terms failure.**
+        #
+        # Authentication itself worked here - it is the delegate exchange after it that did not
+        # - so this account holds the authenticated session that `fetch_terms`, `accept_terms`
+        # and `complete_login` all need. Building a second one would mean asking for the
+        # password again to reach a screen the user is already looking at.
+        #
+        # Withheld for every other reason on purpose. An account that failed for some other
+        # cause is not usable, and handing it to Java is an invitation to store it - which is
+        # the bad *write* that issues #43 and #119 are about.
+        if reason == REASON_TERMS and acc is not None:
+            failure["account"] = acc
+
+        return failure
+
+
+def exportToString(account: AppleAccount) -> str:
+    """
+    Replaces the old account.export() pattern. In FindMy 0.9.x, AppleAccount uses to_json/from_json.
+    The returned dict (AccountStateMapping) embeds the anisette provider state, so the
+    server URL no longer needs to be supplied at restore time.
+
+    The login state is logged on the way out. A stored account that is not LOGGED_IN fails
+    every later fetch inside FindMy.py's own state check, before any request reaches Apple -
+    see issue #43, where an account was somehow persisted as REQUIRE_2FA and stayed that way
+    across a reinstall. Logging it here and at restore is what tells a bad *write* apart from
+    a bad *read*, and it is the only evidence anyone can produce: the stored account holds the
+    Apple ID password and is encrypted under a key that never leaves the device, so a user
+    cannot hand it over and should not be asked to. A state name is not sensitive.
+    """
+    print(f"Storing account, login state: {account.login_state}")
+    return json.dumps(account.to_json())
+
+
+# The anisette provider type accounts are stored with.
+#
+# FindMy's own `aniLocal` is not it: that one needs the unicorn CPU emulator to run Apple's ADI
+# blob, and Chaquopy cannot build unicorn's native code - which is why app/stubs/unicorn exists
+# at all.
+#
+# This app does run ADI locally, but through its own path (the `anisette` package, which loads
+# Apple's real Android libraries), and accounts are deliberately still serialized as
+# "aniRemote" - see LocalAnisetteProvider. So this stays the only supported stored type, and
+# saved logins remain restorable by any build.
+SUPPORTED_ANISETTE_TYPE = "aniRemote"
+
+
+def assertAnisetteIsSupported(serializedAccountData: str) -> str | None:
+    """
+    Check a stored account uses a provider we can actually run, before anything tries
+    to use it.
+
+    Without this the failure surfaces as a NotImplementedError raised from inside the
+    stub `unicorn` package, several layers down in anisette, at whatever unlucky moment
+    the provider is first exercised. Checking the serialized state up front turns that
+    into a clear message at the app boundary.
+
+    :returns: None if supported, otherwise a human-readable reason.
+    """
+    try:
+        data = json.loads(serializedAccountData)
+        anisette_type = (data.get("anisette") or {}).get("type")
+
+        if anisette_type == SUPPORTED_ANISETTE_TYPE:
+            return None
+        if anisette_type is None:
+            return "This saved login has no Anisette configuration and cannot be restored."
+        return (
+            f"This saved login uses an unsupported Anisette provider ({anisette_type}). "
+            "OpenTagViewer supports remote Anisette servers only on Android - local "
+            "Anisette needs a CPU emulator that cannot be built for this platform."
+        )
+    except Exception:
+        print(f"Could not inspect anisette configuration: {traceback.format_exc()}")
+        return "This saved login could not be read."
+
+
+# What went wrong at sign-in, in a form the screen can act on.
+#
+# **`str(e)` is not enough, and that is not a nitpick.** The failure people actually hit is a
+# connection timeout, and `str(TimeoutError())` is the empty string - so the screen said
+# "Login failed:" with nothing after the colon. Several of the exceptions that reach here carry
+# no message at all: TimeoutError, CancelledError and most of asyncio's.
+
+REASON_NETWORK = "network"
+"""Could not reach Apple. Nothing was refused - nothing answered."""
+
+REASON_TERMS = "terms"
+"""
+Apple wants agreement to updated terms before this account can be used.
+
+**Not a broken sign-in, and the one failure here with a remedy inside the app.** Apple takes
+acceptance on one of its own devices or on iCloud.com and nowhere else - so a user of this app
+generally has neither, and without `pendingTerms`/`acceptTerms` they are stuck on a sign-in
+screen that keeps refusing them for a reason nothing tells them.
+"""
+
+REASON_ICLOUD_REFUSED = "icloud_refused"
+"""
+Apple accepted the sign-in and then refused to open iCloud for this account.
+
+**Authentication worked.** The password was right, the second factor was right, and the
+`com.apple.mobileme` delegate exchange that follows them is what failed - so nothing on the
+sign-in screen is wrong and re-entering it changes nothing.
+
+**Split out of :data:`REASON_TERMS`, which used to swallow it.** Every `MobileMeDelegateError`
+was reported as terms pending, because terms were the only cause anybody had a remedy for. The
+response has two independent error channels and terms arrive on only one of them: when
+`localizedError` is absent, the delegate refused the account on its own `status` and the terms
+flow has nothing to show. Reported as issue #221, where somebody whose terms were fine was shown
+an empty document list and told to accept some.
+
+**What it does mean is not established, so the screen does not assert one.** It is met across
+every client sharing this sign-in path, on Apple IDs that have never been used with an Apple
+device - macless-haystack#84, #86 and #87, where the same delegate status arrives both with
+"A server problem is blocking Apple ID sign in" and with "Account limit reached". The advice
+that circulates there is to fill the account out at appleid.apple.com, and that is offered as
+the thing to try rather than as the answer.
+
+**Deliberately not :data:`REASON_APPLE_DECLINED`.** That one says wait and try again, which is
+also what Apple's own wording here says - and across those clients it does not clear on its own.
+Sending somebody back to retry an unchanged sign-in indefinitely is worse than saying plainly
+that the account looks like the problem.
+"""
+
+REASON_APPLE_DECLINED = "apple_declined"
+"""
+Apple answered, and refused to serve the request. Not the password, and not the network.
+
+**A 503 from Grand Slam reads as a rejected sign-in to everybody who meets it**, because the only
+thing on screen is a failure at the moment a password was entered. It is neither: nothing was
+wrong with the credentials, and nothing was reached and refused on their merits. Reported as
+OpenTagViewer#176, where one account met the same 503 three times in three minutes at three
+different call sites.
+
+**It does not reliably clear on its own**, so nothing on screen promises that. The 503s of
+September 2026 were Apple refusing the Xcode client identifier, and lasted until the client
+changed; a 429 has been seen to outlast a reinstall.
+
+Distinguished from :data:`REASON_NETWORK` because the advice differs. A network failure is
+usually the phone's - check the connection. This one is Apple's, and checking anything at this
+end is wasted effort.
+"""
+
+REASON_REFUSED_BEFORE_PASSWORD = "refused_before_password"
+"""
+Grand Slam refused the first step of the sign-in, which carries the username and the Anisette
+headers and no password.
+
+**So the password is not the problem, and the screen must not suggest it is.** This arrived as
+an `InvalidCredentialsError` reading "Email verification failed", shown verbatim, on a device
+whose local Anisette was working - OpenTagViewer#248. What is left is the account itself, or the
+machine identity the Anisette data presents, and the second is the one thing this app can change:
+the screen offers the remote-server route for it, as it does for :data:`REASON_APPLE_DECLINED`.
+
+**Which `ec` means what is not established.** Apple's text here is generic, and the code was not
+kept until the fork started carrying it, so nothing branches on a value. The detail keeps the
+code, so a report carries it.
+
+**A wrong password is not this.** That is refused at the second step, `complete`, and stays
+:data:`REASON_UNKNOWN` - a different Anisette identity cannot fix a bad credential.
+"""
+
+REASON_UNKNOWN = "unknown"
+"""Anything else. The detail is shown as-is, because a wrong guess is worse than raw text."""
+
+# Matched by type rather than by message, because the messages are empty or English prose from
+# three libraries deep. aiohttp's errors all derive from ClientError, and the asyncio ones are
+# what a stalled connection raises.
+_NETWORK_ERRORS = (
+    TimeoutError,
+    ConnectionError,
+    OSError,
+)
+
+
+def classifyLoginFailure(error: BaseException) -> str:
+    """Which kind of failure this is, as a code the Java side maps to a localised sentence."""
+    import asyncio
+
+    # First, because it is the only one of these the user can do anything about from here.
+    # Authentication itself worked and the delegate exchange that follows it did not; unaccepted
+    # terms are the one cause of that with a remedy in this app. **Which error value means
+    # "terms pending" is not established**, so this reports the possibility rather than asserting
+    # it - the screen offers to fetch them and says plainly that if the cause is something else,
+    # accepting terms will not fix it. The desktop CLI makes the same judgement the same way.
+    #
+    # **But only when the response used that channel at all.** `localizedError` is where a
+    # response explains itself in words, and where terms arrive; the delegate's own `status`
+    # fails independently of it. Treating both as terms sent somebody with perfectly good terms
+    # to an empty document list and told them to accept something - issue #221. `status`-only
+    # failures are a refusal of the account, and get their own sentence.
+    #
+    # **Reads `localized_error` rather than `names_a_localized_error`, on purpose.** The property
+    # is the nicer spelling and says exactly this, but it landed in the fork after the commit
+    # pinned in `app/build.gradle.kts`, and the attribute behind it has been there all along. So
+    # this works on the pinned version rather than requiring the pin to move first - which would
+    # drag rule 14's four files into a fix that does not otherwise need them. Switching to the
+    # property is safe whenever the pin next moves; both spellings coexist.
+    if isinstance(error, MobileMeDelegateError):
+        return REASON_TERMS if error.localized_error is not None else REASON_ICLOUD_REFUSED
+
+    # Before the network checks, and not because of ordering hazards - it is a RuntimeError and
+    # collides with none of them. It is here because it reads as the same thing to a user and is
+    # not: Apple answered. Telling somebody to check their connection when their connection is
+    # fine sends them to reset a router over a 503.
+    if isinstance(error, AppleServiceUnavailableError):
+        return REASON_APPLE_DECLINED
+
+    # Only the first step. The same type reports a wrong password at the second, and that one
+    # must not offer a different Anisette server as though it could help.
+    if isinstance(error, GrandSlamRefusedError) and error.before_password:
+        return REASON_REFUSED_BEFORE_PASSWORD
+
+    if isinstance(error, (asyncio.TimeoutError, asyncio.CancelledError)):
+        return REASON_NETWORK
+    if isinstance(error, _NETWORK_ERRORS):
+        return REASON_NETWORK
+
+    # aiohttp is not imported here directly - matching on the module keeps this working
+    # whether or not the library is present, and without importing it for a failure path.
+    module = type(error).__module__ or ""
+    if module.startswith("aiohttp") or module.startswith("aiohappyeyeballs"):
+        return REASON_NETWORK
+
+    return REASON_UNKNOWN
+
+
+def appleAskedToWait(error: BaseException) -> float | None:
+    """
+    Seconds Apple asked for before another attempt, or None when it did not say.
+
+    **None is the usual answer.** It comes from a `Retry-After` header, and no refusal from Grand
+    Slam has been seen carrying one - so the screen treats None as "unknown" and says nothing
+    about a wait, rather than inventing one. When Apple does name a time it is the only reliable
+    advice available, which is why it is carried at all.
+    """
+    if isinstance(error, AppleServiceUnavailableError):
+        return error.retry_after
+    return None
+
+
+def describeLoginFailure(error: BaseException) -> str:
+    """
+    A detail string that is **never empty**.
+
+    Falls back to the exception's type name, which is the whole point: an empty message is how
+    the screen came to show a colon and nothing at all. Kept as a detail rather than a sentence
+    because it is untranslatable Python text - the sentence the user reads is chosen on the Java
+    side from the reason code.
+    """
+    detail = str(error).strip()
+    name = type(error).__name__
+
+    if not detail:
+        return name
+    return f"{name}: {detail}"
+
+
+_PENDING_TERMS: dict[str, Any] = {}
+"""
+The terms documents this sign-in fetched, by page id.
+
+**Held rather than round-tripped through Java, because acceptance takes the fetched object.**
+FindMy.py's `require_fetched` refuses a `Terms` that was rebuilt rather than returned by
+`fetch_terms`, and it is right to: agreeing is a legal act, and the thing agreed to must be the
+thing that was shown. A page id can cross the bridge; the document cannot.
+
+Module-level because signing in is one flow with one user at a time, and cleared on every fetch
+so a second attempt cannot accept a document from the first.
+"""
+
+_ACCEPTED_TERMS: set[str] = set()
+"""Which of them have been agreed to, so the last one knows it is the last one."""
+
+_UNWRAPPED = 10_000
+"""
+Wide enough that the renderer does not wrap, because on Android something else does.
+
+`exporter.terms.render` wraps to a terminal width, which is right for a terminal and wrong for a
+phone: a `TextView` re-wraps whatever it is given, so text already broken at 88 columns comes out
+ragged - short lines with a hard break in the middle of each. Passing a width nothing reaches
+leaves each paragraph as one line and lets the view lay it out for the screen it is actually on.
+
+The structure still survives, which is the part that matters: headings are upper-cased and
+underlined to their own length, and list items keep their `-` and indent.
+"""
+
+
+def pendingTerms(account: AppleAccount) -> str:
+    """
+    Fetch the terms Apple is waiting on, rendered as text a person can actually read.
+
+    **What arrives is a web page**, and putting its tags in front of somebody is not showing them
+    anything. `exporter.terms.render` turns it into text with its structure intact - headings that
+    read as headings, paragraphs wrapped, lists that look like lists - and nothing there shortens,
+    reorders or omits, because what is displayed is what gets agreed to.
+
+    Rendered here rather than in a WebView on the Java side deliberately: Apple's HTML references
+    external stylesheets and images, so a WebView would make network requests to display a legal
+    document, and this reuses the renderer the desktop exporter already has tests for.
+
+    Returns JSON. `documents` is in the order Apple gave them, each with the id it is accepted by,
+    the text to show, and whether it can be accepted at all - `agree_url` is empty for a document
+    Apple will not take agreement to here, which is a thing to say rather than a button to fail.
+    """
+    # Imported here rather than at module scope so an ordinary app start does not pay for bs4,
+    # and so main.py still imports where the shared package is absent.
+    from exporter import terms as termsRenderer
+
+    try:
+        documents = account.fetch_terms()
+    except Exception:
+        err = traceback.format_exc()
+        print(f"Could not fetch the terms of service: {err}")
+        return json.dumps({
+            "ok": False,
+            "reason": REASON_UNKNOWN,
+            "message": err.strip().splitlines()[-1] if err.strip() else "fetch_terms failed",
+        })
+
+    _PENDING_TERMS.clear()
+    _ACCEPTED_TERMS.clear()
+
+    rendered = []
+    for document in documents:
+        _PENDING_TERMS[document.page_id] = document
+        rendered.append({
+            "pageId": document.page_id,
+            "text": termsRenderer.render(document.html, width=_UNWRAPPED),
+            "canAccept": bool(document.agree_url),
+        })
+
+    print(f"Apple is waiting on {len(rendered)} terms document(s): "
+          f"{[d['pageId'] for d in rendered]}")
+
+    return json.dumps({"ok": True, "documents": rendered})
+
+
+def acceptTerms(account: AppleAccount, pageId: str) -> str:
+    """
+    Agree to one document, and finish signing in once the last one is done.
+
+    **One at a time, and only one that was shown.** The caller accepts the document the user just
+    read; a call naming anything else is refused rather than guessed at, because the alternative
+    is recording agreement to something nobody saw.
+
+    Signing in is completed only when every fetched document has been agreed to - `complete_login`
+    is the delegate exchange that failed in the first place, and running it with terms still
+    outstanding would just fail again.
+
+    Returns JSON carrying `remaining`, and on the last one `loginState`. **The caller must not
+    store the account unless that reads `LOGGED_IN`**: a blob written in any other state fails
+    every later fetch inside FindMy.py's own state check, which is issue #43 and issue #119.
+    """
+    document = _PENDING_TERMS.get(pageId)
+
+    if document is None:
+        return json.dumps({
+            "ok": False,
+            "reason": "no_such_document",
+            "message": f"No terms document called {pageId!r} was fetched for this sign-in.",
+        })
+
+    try:
+        account.accept_terms(document)
+        _ACCEPTED_TERMS.add(pageId)
+
+        remaining = [i for i in _PENDING_TERMS if i not in _ACCEPTED_TERMS]
+        print(f"Accepted terms {pageId!r}; {len(remaining)} document(s) still outstanding")
+
+        if remaining:
+            return json.dumps({"ok": True, "remaining": len(remaining)})
+
+        state = account.complete_login()
+        print(f"All terms accepted; signing in ended at {state}")
+
+        return json.dumps({
+            "ok": True,
+            "remaining": 0,
+            "loginState": str(getattr(state, "name", state)),
+        })
+    except Exception:
+        err = traceback.format_exc()
+        print(f"Could not accept the terms of service: {err}")
+        return json.dumps({
+            "ok": False,
+            "reason": REASON_UNKNOWN,
+            "message": err.strip().splitlines()[-1] if err.strip() else "accept_terms failed",
+        })
+
+
+def _treatHsc409AsSecondFactor(acc: AppleAccount) -> None:
+    """Read Grand Slam's new way of asking for a second factor as asking for one.
+
+    Since 2026-10-12, a password Apple accepts but wants a code for is answered at SRP `complete`
+    with `hsc` 409 and **no `au`** - the field the pinned FindMy.py reads to decide that 2FA is
+    needed. Seeing no `au`, the library concludes the sign-in is complete, skips the code, and the
+    `mobileme` step after it fails with `status=1`. Reported in malmeloo/FindMy.py#278 and on
+    parawanderer/OpenTagViewer#248; the remedy, setting `au` to `trustedDeviceSecondaryAuth`, is
+    the one sacca97/os-findmy-e signed in with.
+
+    **A stopgap until the pin moves.** The fix belongs in FindMy.py's `_gsa_authenticate`, which is
+    where malmeloo/FindMy.py#279 puts it, as `_normalize_2fa_status`; the same change is proposed
+    for parawanderer/FindMy.py. A FindMy.py that has it is left alone here, so moving the pin (rule
+    14) makes this a no-op, and the next change deletes it.
+
+    Until then it wraps the instance's `_gsa_request`, which `_gsa_authenticate` looks up on the
+    instance. If a later FindMy.py renames it, this says so and changes nothing, and the 2FA bug
+    comes back.
+    """
+    if _FINDMY_READS_HSC_409:
+        return
+
+    inner = getattr(acc, "_asyncacc", None)
+    original = getattr(inner, "_gsa_request", None) if inner is not None else None
+    if inner is None or original is None:
+        print("FindMy's account internals have changed; hsc 409 will not be read as 2FA")
+        return
+
+    async def _gsa_request(parameters: Any, *args: Any, **kwargs: Any) -> Any:
+        response = await original(parameters, *args, **kwargs)
+        status = response.get("Status") if isinstance(response, dict) else None
+        if (isinstance(parameters, dict) and parameters.get("o") == "complete"
+                and isinstance(status, dict) and status.get("hsc") == 409
+                and not status.get("au")):
+            print("Grand Slam answered hsc 409 with no au: treating it as a second factor")
+            status["au"] = "trustedDeviceSecondaryAuth"
+        return response
+
+    inner._gsa_request = _gsa_request
+
+
+def _preferLocalAnisette(acc: AppleAccount, localAnisette: Any) -> None:
+    """Swap a restored account's anisette provider for the local one, if it is usable.
+
+    This matters more than it looks: restoring a saved login is the common path, and a
+    restored account carries the remote provider that was serialized with it. Without this,
+    local Anisette would only ever apply to the one login where the account was first created,
+    and every subsequent session would go back to relaying through a public server.
+
+    Failing here is not an error - the account already has a working remote provider, so the
+    worst case is the behaviour the app has always had.
+    """
+    if localAnisette is None:
+        return
+
+    try:
+        if not localAnisette.ensureReady():
+            print(
+                "Local Anisette unavailable, restored account will use its remote server: "
+                f"{localAnisette.unavailableReason()}"
+            )
+            if localAnisette.isChangingMachineIdentity():
+                # Worth saying plainly. This session was established with a machine identity
+                # that no longer exists for it, so Apple may not recognise the device any
+                # more and may demand re-authentication. That is a consequence, not a bug,
+                # and it should not look like one.
+                print(
+                    "WARNING: this session was established with local Anisette and is now "
+                    "continuing against a remote server. Apple sees a different machine, so "
+                    "signing in again may be required."
+                )
+            return
+
+        # AppleAccount is a synchronous wrapper; the provider lives on the async account it
+        # delegates to. FindMy exposes no setter for it, hence reaching in - and hence the
+        # getattr guards, so a rename upstream degrades to "keep using remote" rather than
+        # breaking every restore.
+        inner = getattr(acc, "_asyncacc", None)
+        previous = getattr(inner, "_anisette", None) if inner is not None else None
+        if inner is None or previous is None:
+            print("FindMy's account internals have changed; keeping the remote provider")
+            return
+
+        # Carried across from the provider FindMy just rebuilt, not taken from this app's
+        # identity: swapping the Anisette transport must not change the machine Apple sees.
+        # An account signed in before any of this restores to FindMy.py's defaults and keeps
+        # them, which is what spares that user a re-login.
+        carried = app_identity.identityForRestore(previous)
+
+        inner._anisette = LocalAnisetteProvider(
+            localAnisette, getattr(previous, "_server_url", ""), **carried
+        )
+        print(
+            f"Restored account switched to local Anisette: {localAnisette.describe()}"
+            f" (keeping serial {carried.get('serial', 'FindMy default')})"
+        )
+    except Exception:
+        print(f"Could not switch to local Anisette: {traceback.format_exc()}")
+
+
+def getAccount(
+        serializedAccountData: str,
+        anisetteServerUrl: str | None = None,
+        localAnisette: Any = None) -> AppleAccount | None:
+    """
+    Restore an AppleAccount via FindMy 0.9.x's `from_json`. The anisette provider is rebuilt
+    from the embedded state inside the JSON, so `anisetteServerUrl` is unused here.
+
+    If `localAnisette` is supplied and usable, the rebuilt provider is then swapped for one
+    backed by this device - see `_preferLocalAnisette`.
+    """
+    try:
+        unsupported = assertAnisetteIsSupported(serializedAccountData)
+        if unsupported:
+            print(f"Refusing to restore account: {unsupported}")
+            return None
+
+        data = json.loads(serializedAccountData)
+
+        acc = AppleAccount.from_json(data)
+        _preferLocalAnisette(acc, localAnisette)
+        # A restored session re-authenticates on its own after a 401, through the same exchange.
+        _treatHsc409AsSecondFactor(acc)
+
+        print(f"Restored account, login state: {acc.login_state}")
+
+        if acc.login_state == LoginState.REQUIRE_2FA:
+            # **Handed back rather than discarded, which is a change from the issue #43 fix.**
+            #
+            # That fix treated any non-LOGGED_IN restore as a failure, on the reasoning that the
+            # app only stores an account after a completed sign-in, so this state can only mean
+            # the session went bad afterwards. That reasoning is about *how it got here*, and
+            # says nothing about whether it can be fixed - which was the gap. REQUIRE_2FA is
+            # exactly the state a second factor resolves, and resolving it needs this account
+            # object, not the password.
+            #
+            # So the caller is given the account and asks `getSecondFactorMethodsIfNeeded` what
+            # it needs. A code costs the user six digits; discarding costs them their Apple
+            # password and a full sign-in, for a session that may have been one step from
+            # working. If the code fails, the caller still falls back to signing in properly -
+            # strictly better when recoverable, no worse when not.
+            print(
+                "Restored account needs a second factor. Handing it back so the app can ask "
+                "for a code, rather than throwing away a session six digits might fix."
+            )
+            return acc
+
+        if acc.login_state != LoginState.LOGGED_IN:
+            # Logged out, or a state nothing here knows. No code fixes these, so this really is
+            # a failed restore: the caller signs the user in again. Issue #43's other half.
+            print(
+                f"Restored account is not logged in (state: {acc.login_state}) and no second "
+                "factor resolves that. Treating it as a failed restore so the user is asked to "
+                "sign in again rather than left with a map that never updates."
+            )
+            # Built, found unusable, and about to go out of scope - so close it here rather than
+            # leaving a session and two sockets to a finaliser that cannot do it. See #133.
+            closeAccount(acc)
+            return None
+
+        return acc
+    except Exception:
+        err = traceback.format_exc()
+        print(f"Failed to restore account from string: {err}")
+        return None
+
+
+def getSecondFactorMethodsIfNeeded(account: AppleAccount) -> list | None:
+    """
+    The 2FA methods this account needs to go through, or None if it needs nothing.
+
+    **The session going stale mid-use, which used to be a permanent silent failure.** An account
+    restores as `LOGGED_IN`, works, and then at some later point Apple moves it to `REQUIRE_2FA`
+    - the device was removed from the account, the session aged out, something on Apple's side.
+    From that moment every fetch raises `InvalidStateError` before a request is even made.
+
+    Nothing recovered from that. The per-accessory handler counted each failure and carried on,
+    the whole call reported an error, and the app logged it and waited to retry - which never
+    helps, because the state does not heal itself. The user saw pins that stopped updating and
+    no reason anywhere.
+
+    **This is recoverable, and that is the point.** `REQUIRE_2FA` is not a dead session: the
+    account object is still usable and a second factor puts it back to `LOGGED_IN` without the
+    password. So the honest response is to ask for the code, not to throw the session away -
+    see issue #43 for the *other* door onto the same state, where discarding really is correct
+    because the account could not be restored at all.
+
+    :return: the same shape `getAccount` returns as ``loginMethods``, so Java reads it with the
+        code it already has. None when the account is fine, and **None on any failure to ask** -
+        an unreadable state is not evidence that a second factor would help, and prompting on a
+        guess trains people to type codes at random dialogs.
+    """
+    try:
+        state = account.login_state
+
+        if state == LoginState.LOGGED_IN:
+            return None
+
+        if state != LoginState.REQUIRE_2FA:
+            # Something else entirely - logged out, or a state this does not know. There is no
+            # code that fixes those, so say nothing rather than offering a box to type into.
+            print(f"Account is in {state}, which a second factor does not resolve.")
+            return None
+
+        methods = [_convertToJavaDictWrapper(method) for method in account.get_2fa_methods()]
+
+        # **An empty list is not the same as "nothing needed", and the caller must not read it
+        # that way.** A session can be in REQUIRE_2FA with no way to deliver a code - it is what
+        # FindMy.py means by "Unexpected login state after reauth ... Please log in again". There
+        # is nothing to type, so the only honest move left is a full sign-in, and a caller that
+        # treated this as "fine" would leave exactly the silent dead session this set out to fix.
+        #
+        # So: None means nothing needed, a list means a code is needed, and an empty one means a
+        # code is needed and cannot be asked for.
+        print(f"Account is in {state} and offers {len(methods)} way(s) to send a code.")
+
+        return methods
+    except Exception:
+        print(f"Could not work out whether a second factor is needed: {traceback.format_exc()}")
+        return None
+
+
+def closeAccount(account: AppleAccount) -> bool:
+    """
+    Shut an account's HTTP session and event loop down, before letting go of it.
+
+    **Nothing did this, and the collector cannot.** An ``AppleAccount`` owns an aiohttp session,
+    a connector and an asyncio loop. Dropping one leaks all of it: two sockets, held until the
+    garbage collector runs, and then not released even so - ``Closable.__del__`` tries
+    ``loop.run_until_complete(self.close())`` and swallows the ``RuntimeError`` when that fails,
+    leaving the coroutine unawaited. That is the warning people see:
+
+        RuntimeWarning: coroutine 'AppleAccount.close' was never awaited
+        ResourceWarning: Unclosed client session / Unclosed connector / unclosed transport fd=181
+
+    **Why the caller has to do it explicitly.** The *sync* ``AppleAccount`` wraps every other
+    method as ``self._evt_loop.run_until_complete(self._asyncacc.<method>())`` - and then declares
+    ``close`` ``async`` anyway, alone among them. So a sync caller cannot simply call it, and the
+    one thing that tries is a finaliser running at an arbitrary moment on an arbitrary thread.
+    Worth reporting upstream; until then, this does what the sync wrapper should have.
+
+    :return: whether it was actually closed. False is not worth failing anything over - the
+        caller is discarding this account either way - but it is worth logging, because a
+        version of FindMy.py that renames the loop would silently stop closing anything.
+    """
+    if account is None:
+        return False
+
+    try:
+        # `_evt_loop` on the sync account, `_loop` on Closable. Both private, and there is no
+        # public route; asyncio.run would build a *new* loop, and the session belongs to this one.
+        loop = getattr(account, "_evt_loop", None) or getattr(account, "_loop", None)
+
+        if loop is None or loop.is_closed():
+            print("Not closing the account: it has no usable event loop to close it on.")
+            return False
+
+        loop.run_until_complete(account.close())
+        print("Closed the account's HTTP session and connector.")
+        return True
+    except Exception:
+        # Discarding this account regardless, so a failure here changes nothing the caller does.
+        print(f"Could not close the account cleanly: {traceback.format_exc()}")
+        return False
+
+
+def convertPlistToJson(
+        plistXmlString: str,
+        alignmentPlistXmlString: str | None = None) -> str | None:
+    """
+    One-shot conversion from the legacy plist XML representation (still stored in
+    OwnedBeacon.content) to the JSON form that FindMy 0.9.x expects.
+
+    Used in two places (called from Java):
+    - During .zip import: convert once and store alongside the raw plist
+    - As a lazy backfill: when reading an OwnedBeacon row that predates the upgrade
+
+    `alignmentPlistXmlString` is the accessory's KeyAlignmentRecord, if the export
+    contained one (format 0.0.2 and later). It supplies the rolling-key index macOS last
+    observed, so fetching can start there. Without it the accessory starts at index 0 from
+    its pairing date and the first fetch searches the tag's entire history - tens of
+    thousands of keys for an older tag. Optional, because exports predating 0.0.2 have no
+    such record and must keep working.
+
+    Returns None on failure so Java can decide how to recover.
+    """
+    try:
+        fp = BytesIO(plistXmlString.encode('utf-8'))
+
+        # from_plist accepts bytes for the alignment record but not a file object,
+        # unlike its first parameter.
+        alignment_bytes = (
+            alignmentPlistXmlString.encode('utf-8') if alignmentPlistXmlString else None
+        )
+
+        accessory = FindMyAccessory.from_plist(fp, alignment_bytes)
+        return json.dumps(accessory.to_json())
+    except Exception:
+        print(f"convertPlistToJson failed: {traceback.format_exc()}")
+        return None
+
+
+def _filterReportsByTimeRange(reports, startMs, endMs):
+    """
+    Apple's network only ever returns ~7 days of history and 0.9.x removed the
+    user-facing time-range parameters from fetch_location_history. We filter
+    here so the Java side keeps the same time-window semantics it had before.
+    """
+    out = []
+    for r in reports:
+        ts_ms = _toUnixEpochMs(r.timestamp)
+        if ts_ms is None:
+            continue
+        if startMs is not None and ts_ms < startMs:
+            continue
+        if endMs is not None and ts_ms > endMs:
+            continue
+        out.append(r)
+    return out
+
+
+# Apple accepts at most ~290 hashed keys per request, and FindMy.py walks the key index
+# range one step at a time (15 minutes per step for an AirTag). Anything wider than this
+# is enough round trips to be worth avoiding.
+_ALIGNMENT_PROBE_THRESHOLD_INDICES = 2000
+
+# How wide a fruitless key search has to be before the accessory is called dead.
+#
+# **Width, not "we found nothing".** A tag with no key alignment record always searches from its
+# pairing date, so a *young* one searches a small range and finding nothing there means very
+# little - it may simply not have been near an iPhone this week, and it will report eventually.
+# A search this wide means the tag has been silent for months: at an AirTag's ~96 indices a day,
+# 20,000 is around seven months. Nothing that has said nothing for seven months is about to.
+#
+# The point of noticing is not tidiness. Each of these costs a full-history search at ~290 keys
+# per request, every time anything refreshes - the account-flagging risk in rule 6, spent on a
+# tag that will never repay it.
+_DEAD_TAG_WIDTH_INDICES = 20000
+
+# Apple rejects requests carrying much more than ~290 hashed keys, so a ranged fetch is split
+# into chunks below that with a little headroom.
+_MAX_KEYS_PER_REQUEST = 255
+
+# Ceiling on how many requests one ranged fetch may make. A single day is ~96 indices for an
+# AirTag, so roughly one request; the cap only bites when alignment is unknown and the key
+# range balloons. Without it, a history screen could quietly fire hundreds of requests at
+# Apple - the account-flagging risk from issue #30, arriving through a different door.
+_MAX_REQUESTS_PER_RANGE_FETCH = 8
+
+# Attempts per request. Apple's endpoint times out often enough to see it by hand, and for a
+# single day the range is one request - so one timeout meant a whole day of history came back
+# empty. Two attempts, not more: this is a retry against a rate-sensitive endpoint.
+_RANGE_FETCH_ATTEMPTS = 2
+_RANGE_FETCH_RETRY_DELAY_SECONDS = 1
+
+
+StoredAccessory = FindMyAccessory | FixedRollingKeyPairAccessory
+"""
+Either kind of tag this app can locate.
+
+A union rather than their shared base, because the base is not enough: `RollingKeyPairSource`
+has the key methods but not `to_json`, which comes from `Serializable` further along a separate
+line. Naming the two concrete classes says what is actually true - these two, and adding a
+third is a deliberate edit here.
+"""
+
+ACCESSORY_TYPES: dict[str, type[StoredAccessory]] = {
+    "accessory": FindMyAccessory,
+    "custom_rolling_key_accessory": FixedRollingKeyPairAccessory,
+}
+"""
+Which class reads which stored accessory, keyed by FindMy.py's own `type` tag.
+
+**Two sibling classes, not a base and a subclass.** An Apple-paired accessory derives its keys
+from a master key, a shared secret and a secondary secret; a self-generated one - OpenHaystack
+style - carries a plain list of pre-generated keys and derives nothing. Neither is a special
+case of the other, and FindMy.py has no factory that reads both, so the dispatch lives here.
+
+The tag is theirs, written by `to_json` and asserted by each `from_json`, so a mapping handed
+to the wrong class fails loudly rather than half-loading.
+"""
+
+
+def accessoryFromJson(accessoryJson: str) -> StoredAccessory:
+    """
+    Rebuild a stored accessory, whichever kind it is.
+
+    Everything the fetch path does to an accessory - `keys_between`, `get_min_index`,
+    `get_max_index`, `update_alignment`, `to_json` - is on `RollingKeyPairSource`, which both
+    kinds implement. So this is the **only** place the difference matters, and the rest of the
+    fetch path never learns which it has.
+
+    :raises ValueError: if the stored JSON names a type this version cannot read. Deliberately
+        loud: the alternative is guessing, and guessing wrong means fetching against keys that
+        belong to a different derivation - which finds nothing, and looks like a tag out of range
+        rather than like a bug.
+    """
+    mapping: Any = json.loads(accessoryJson)
+    kind = mapping.get("type") if isinstance(mapping, dict) else None
+
+    accessoryType = ACCESSORY_TYPES.get(kind) if isinstance(kind, str) else None
+    if accessoryType is None:
+        raise ValueError(
+            f"stored accessory has type {kind!r}, which this version cannot read - "
+            f"known types are {sorted(ACCESSORY_TYPES)}"
+        )
+
+    # Cast because the two from_json signatures each want their own TypedDict, and this is
+    # untyped JSON off disk. Validating it is precisely what from_json does - it asserts the
+    # type tag and raises on a missing field - so re-describing the shape here would be a
+    # second implementation of a check the library already owns.
+    return accessoryType.from_json(cast(Any, mapping))
+
+
+#: How far either side of the believed alignment to look for the accessory's current key.
+#
+# **Not zero, which is what a bare call would use.** Without a margin the search starts at the
+# alignment index, so an accessory whose true index has drifted *below* where alignment believes
+# it is can never be matched - it is simply absent from its own candidate set, with nothing
+# raising anywhere. FindMy.py's own `NearbyOfflineFindingDevice.is_from` takes the same
+# precaution with the same twelve hours, and its docstring records the failure being observed on
+# real hardware advertising a metre from the scanner.
+#
+# **Forty-eight hours, and the number is derived rather than guessed.** Alignment is written
+# from `min(key_to_ind[key])` in the pinned FindMy.py's `reports.py` - deliberately the lowest
+# index a matched key could belong to, because underestimating is the safe direction. For a
+# secondary key that is an underestimate of real size: `keys_at` offers two secondary keys per
+# index (`ind // 96 + 1` and `+ 2`), so one secondary key spans 192 primary indices. A report
+# decrypted against a secondary key can therefore leave alignment up to 192 indices - 48 hours -
+# below the truth, and stay there until a primary match corrects it.
+#
+# So the margin has to reach 48 hours or a tag aligned that way is absent from its own candidate
+# set. Measured before this was understood: a tag beside the phone at -24 dBm, advertising
+# steadily, sat 58 indices above where alignment believed "now" was, and the twelve hours
+# FindMy.py's own `is_from` uses reaches only 48 indices.
+#
+# The margin is what lets such a tag be picked up again at all; `recordAccessorySeen`'s
+# secondary-key floor is what pulls alignment back up afterwards, so the full width is only
+# needed until the first sighting lands.
+#
+# Forty-eight hours off a fresh alignment is around 1150 key derivations - 1.15s on desktop
+# and several times that under Chaquopy, which is why `recordAccessorySeen` takes an index
+# hint rather than re-deriving the window on every sighting. The
+# cost is only bounded while the alignment *is* fresh, and this app does produce accessories
+# where it is not: enabling "show my own Apple devices" puts a phone in the list, and a phone
+# has no rolling-key alignment to be fresh. Measured on one that was switched off, the window
+# came to 39636 indices - over a year of keys, derived on a blocking call. See
+# `_MAC_CANDIDATE_MAX_INDICES`, which is what stops the whole of that being attempted.
+_MAC_CANDIDATE_MARGIN = timedelta(hours=48)
+
+#: How much of a candidate window is derived when the whole of it is too wide.
+#
+# **This is a guard against one entry costing every other entry its scan.** Callers ask per
+# accessory, in a loop, and the derivation is blocking EC work with no interruption point. If
+# one accessory takes minutes, the loop never reaches the ones after it and the scan never
+# starts - so every tag stops being seen, with nothing failing anywhere to say why.
+#
+# The width is set by how *stale* the alignment is, not by whether there is one. Measured on
+# desktop CPython, which is several times faster than Chaquopy on a phone:
+#
+#     alignment stale by     width      derivation
+#              1 day           144          0.5 s
+#              7 days          720          2.3 s
+#             30 days        2,928          9.3 s
+#            120 days       11,568         36.6 s
+#            400 days       38,448        121.9 s
+#
+# Linear, about 3.2 ms per index. The 39,636-index case that prompted this was an owner's own
+# phone, switched off, pulled in by "show my own Apple devices" - a phone has no rolling-key
+# alignment and never gains one.
+#
+# A thousand is roughly a week of staleness: enough for a tag that has missed a few fetches,
+# and a couple of seconds at worst.
+#
+# **An accessory past it is bounded rather than refused**, deriving the newest N indices rather
+# than the whole span. A tag that is advertising right now has been running, so its true index
+# tracks the wall clock and sits at the top of the window; the bottom is only reachable by a
+# tag that was switched off for months, which is not advertising and so has nothing to match
+# anyway. Refusing outright was the earlier answer and was worse: it cost every never-aligned
+# tag its BLE matching entirely.
+#
+# Done here with a second key walk, because `current_mac_addresses` in the pinned FindMy.py
+# has no `max_indices` to ask for this. Worth sending upstream so the walk can go.
+_MAC_CANDIDATE_MAX_INDICES = 1000
+
+
+#: What `addressesBetween` reports instead of an index it cannot vouch for. Not None, because
+#: the mapping crosses to Java as a plain map and a null value there is indistinguishable from
+#: an address that was never derived at all.
+_INDEX_UNKNOWN = -1
+
+
+def candidateWindow(accessoryJson: str):
+    """The key index range worth scanning for this accessory right now, without deriving it.
+
+    **Cheap on purpose.** `currentMacAddresses` answers the same question and pays for the
+    answer, which is fine when the addresses are what you want and wasteful when all you need
+    to know is which part of the range you are missing. Deciding that is what lets a caller
+    keep what it derived last time and ask only for the rest, and the whole point of keeping
+    it is not paying this cost again.
+
+    Bounded exactly as `currentMacAddresses` bounds it, so the two never disagree about which
+    slice is the live one.
+
+    Returns a mapping with `lo` and `hi` inclusive, or None if the accessory cannot be read.
+    """
+    try:
+        accessory = accessoryFromJson(accessoryJson)
+
+        now = datetime.now(timezone.utc)
+        top = accessory.get_max_index(now + _MAC_CANDIDATE_MARGIN)
+        width = _isAlignmentWide(
+            accessory, now - _MAC_CANDIDATE_MARGIN, now + _MAC_CANDIDATE_MARGIN)
+
+        if width > _MAC_CANDIDATE_MAX_INDICES:
+            bottom = top - _MAC_CANDIDATE_MAX_INDICES
+        else:
+            bottom = accessory.get_min_index(now - _MAC_CANDIDATE_MARGIN)
+
+        return {"lo": max(0, bottom), "hi": top}
+    except Exception:
+        print(f"candidateWindow failed: {traceback.format_exc()}")
+        return None
+
+
+def addressesBetween(accessoryJson: str, lo: int, hi: int):
+    """The addresses this accessory can advertise at every index from `lo` to `hi` inclusive.
+
+    **The set of addresses never goes out of date, and that is what a stored copy rests on.**
+    An address is a pure function of the accessory's keys and an index, so an address derived
+    once is still one this accessory can advertise; only which part of the range is worth
+    watching moves, and that is `candidateWindow`'s answer rather than this one's. Splitting a
+    range into pieces and joining the results yields exactly the same set as asking for it
+    whole, which is what lets a caller widen its search a piece at a time.
+
+    **A secondary key's index is reported as -1 rather than as a number that would be
+    believed.** `keys_between` de-duplicates, and a secondary key covers 96 consecutive primary
+    indices, so it comes back at the first index the *call's own* range happens to reach: ask
+    for 19100..19160 and it is 19100, ask for 19131..19160 and the same address is 19131. That
+    is an artefact of where the search started, not a fact about the tag, and a caller storing
+    it would later read it as exact. A primary key occurs at exactly one index and does not
+    move, so its index is given as it is.
+
+    That distinction is what lets an address kept from an earlier, wider derivation still repair
+    an alignment months out of step: the sighting arrives with an exact index, and
+    `recordAccessorySeen` confirms it with three derivations instead of searching a window that,
+    by definition, does not contain it.
+
+    Deliberately takes the range rather than working it out. A caller widening its search a
+    piece at a time needs to say which piece, and a function that decided for itself could not
+    be asked for the piece below the one it would have chosen.
+
+    Returns None on failure, which a caller must tell apart from an empty range.
+    """
+    try:
+        if hi < lo:
+            return {}
+
+        accessory = accessoryFromJson(accessoryJson)
+
+        started = time.perf_counter()
+        derived = {
+            key.mac_address: (index if key.key_type == KeyPairType.PRIMARY else _INDEX_UNKNOWN)
+            for index, key in accessory.keys_between(max(0, lo), hi)
+        }
+        _reportDerivationCost(hi - max(0, lo) + 1, derived, started)
+        return derived
+    except Exception:
+        print(f"addressesBetween failed: {traceback.format_exc()}")
+        return None
+
+
+def _reportDerivationCost(width, derived, started):
+    """Says what deriving a candidate window actually cost, in indices and in seconds.
+
+    This is the one expensive call in the BLE path and the only one whose price scales with
+    how stale an alignment is, so how far a search can be widened before it stops being
+    affordable is a question about this number. It was answered with adjectives for a long
+    time - "several times slower under Chaquopy" - which is not a number anybody can size a
+    background task with. Printed per index rebuild rather than per sighting, which is rare
+    enough to be free and often enough to catch a device that is far slower than the desktop.
+    """
+    elapsed = time.perf_counter() - started
+    count = 0 if derived is None else len(derived)
+    per_thousand = (elapsed / width * 1000) if width else 0.0
+    print(f"Derived {count} candidate address(es) over {width} index/indices "
+          f"in {elapsed:.2f}s ({per_thousand:.2f}s per 1000)")
+
+
+def currentMacAddresses(accessoryJson: str) -> dict[str, int] | None:
+    """
+    The BLE MAC address(es) this accessory might currently be advertising, each with its index.
+
+    Lets Java recognise an owned accessory's own advertisement in a BLE scan, so it can be
+    triggered directly (playing a sound) without going through Apple's Find My network - the
+    same thing Find My itself does when a tag is close enough to reach over Bluetooth.
+
+    Delegates to `RollingKeyPairSource.current_mac_addresses`, added to the pinned FindMy.py
+    fork alongside this feature: it spans the accessory's `get_min_index`/`get_max_index`
+    range for *now* rather than a single index, to account for rollover uncertainty since the
+    last observed alignment.
+
+    **Each address maps to the key index it came from**, so a caller that matches one can hand
+    it straight to `recordAccessorySeen` - which is what keeps the next call cheap. Returning a
+    bare list would throw that away.
+
+    Returns None on failure so Java can decide how to recover - a missing or unreadable
+    accessory is worth telling apart from "no keys", which would be an empty mapping.
+
+    **An accessory whose window is absurdly wide has only its newest slice derived**, and that
+    is decided here rather than in the caller, because by the time the caller could measure the
+    answer the work has already been done. See `_MAC_CANDIDATE_MAX_INDICES` for what that
+    protects, and why the slice is the newest one.
+    """
+    try:
+        accessory = accessoryFromJson(accessoryJson)
+
+        now = datetime.now(timezone.utc)
+        started = time.perf_counter()
+        width = _isAlignmentWide(
+            accessory, now - _MAC_CANDIDATE_MARGIN, now + _MAC_CANDIDATE_MARGIN)
+
+        if width > _MAC_CANDIDATE_MAX_INDICES:
+            # **Bounded to the newest slice rather than refused.** A tag advertising right now
+            # has been running, so its index tracks the wall clock and sits at the top of the
+            # window; the bottom belongs to a tag that was switched off for months, which is not
+            # advertising and so has nothing to match anyway. Refusing outright cost every
+            # never-aligned tag its BLE matching, which is a worse trade than searching the part
+            # of the range that can plausibly be live.
+            top = accessory.get_max_index(now + _MAC_CANDIDATE_MARGIN)
+            bottom = top - _MAC_CANDIDATE_MAX_INDICES
+            print(f"Candidate window is {width} indices wide; deriving only the newest "
+                  f"{_MAC_CANDIDATE_MAX_INDICES} ({bottom}..{top}), which is what a running "
+                  f"accessory can plausibly be advertising.")
+            derived = {
+                key.mac_address: index
+                for index, key in accessory.keys_between(max(0, bottom), top)
+            }
+            _reportDerivationCost(_MAC_CANDIDATE_MAX_INDICES, derived, started)
+            return derived
+
+        derived = accessory.current_mac_addresses(margin=_MAC_CANDIDATE_MARGIN)
+        _reportDerivationCost(width, derived, started)
+        return derived
+    except Exception:
+        print(f"currentMacAddresses failed: {traceback.format_exc()}")
+        return None
+
+
+def _matchAt(accessory, mac: str, index: int | None):
+    """Check one index for `mac`, which is the whole point of the hint.
+
+    **Java knows which index its candidate set derived the address from, and cannot act on
+    it.** Only here can a primary key be told from a secondary one, and that distinction is what
+    decides whether alignment may be trusted. So the index arrives as a hint to be verified
+    rather than as an answer: this re-derives the keys at that index and checks the address
+    itself, exactly as the wide scan would, and reports the key type it actually found.
+
+    The saving is the reason it exists. The 48-hour window is around 1150 key derivations,
+    measured at 1.15s on desktop and several times that under Chaquopy; one index is three.
+    Running the wide version on the sighting callback's cadence put the app at 135% CPU with two
+    tags in range and got it killed for not answering input.
+    """
+    if index is None:
+        return None, None
+
+    for key in accessory.keys_at(index):
+        if key.mac_address != mac:
+            continue
+        if key.key_type == KeyPairType.PRIMARY:
+            return index, None
+        return None, index
+
+    return None, None
+
+
+def _matchAcross(candidates: dict, mac: str):
+    """Find `mac` among already-derived keys, preferring a primary match."""
+    matched_secondary = None
+
+    for key, index in candidates.items():
+        if key.mac_address != mac:
+            continue
+        if key.key_type == KeyPairType.PRIMARY:
+            return index, None
+        matched_secondary = index
+
+    return None, matched_secondary
+
+
+def recordAccessorySeen(accessoryJson: str, mac: str, seenAtUnixMs: int,
+                        hintIndex: int | None = None) -> str | None:
+    """
+    Tell an accessory it was seen advertising as `mac`, and hand back its new state.
+
+    **This is what stops the margin above being paid for twice.** A BLE sighting is worth
+    realigning to, the same as a decrypted location report is. Without this the twelve-hour
+    range is re-derived on every scan; with it, the call after a hit collapses to the three
+    keys of a single index.
+
+    **Takes the address rather than the index `currentMacAddresses` returned for it, and that
+    difference is load-bearing.** That index is only trustworthy when the address came from a
+    *primary* key: a primary index is unique, one key per index, so a match against it proves
+    the true index outright. A secondary key covers 96 consecutive primary indices - see
+    `_AccessoryKeyGenerator._secondary_keys_at` - so its index is only the first one the search
+    happened to reach, not the true one. Fed to `update_alignment` without checking, that index
+    can ratchet alignment past the true index in the wrong direction - measured on a real
+    accessory that drifted 114 indices (28.5 hours) ahead this way and then needed a multi-day
+    margin just to be found at all. The fix has to happen here rather than by filtering the map
+    `currentMacAddresses` returns, because an address derived from a secondary key is still
+    worth *scanning for* - only not worth *aligning to*.
+
+    **Does not go through `update_alignment`, and that is also deliberate.** It only ever moves
+    forward - correct for a fetch, where every index it sees came from searching ahead of where
+    alignment already believes it is, so "never seen a lower one" is a safe rule there. A BLE
+    match is not built that way: it comes from a wide, symmetric window, so a primary match can
+    legitimately land below the stored alignment - proof that alignment had already drifted too
+    far ahead, from an earlier secondary-key mistake or otherwise. Refusing to correct downward
+    would leave that drift permanent, which is the whole failure this function exists to undo.
+    So a primary match's index is written to the accessory's serialized state directly, in
+    either direction.
+
+    So this re-derives the key at `mac` itself, from scratch, and only accepts a match through
+    its primary key. A secondary-only match, or no match at all (the candidate set may have
+    moved on since the scan that found `mac`), records nothing.
+
+    Returns the re-serialized accessory for Java to write back to `OwnedBeacon.accessory_json`,
+    the same field and the same reason as `getLastReports`' `updatedAccessoryJson`. None on
+    failure or on nothing worth recording, because a sighting that cannot be recorded is not
+    worth failing a sound over.
+    """
+    try:
+        accessory = accessoryFromJson(accessoryJson)
+        if not isinstance(accessory, FindMyAccessory):
+            # A self-generated accessory's keys don't rotate (update_alignment is a no-op for
+            # it) - there is no drift here for this to fix.
+            return None
+
+        seen_at = datetime.fromtimestamp(seenAtUnixMs / 1000, tz=timezone.utc)
+        mac = mac.upper()
+
+        matched_primary, matched_secondary = _matchAt(accessory, mac, hintIndex)
+
+        if matched_primary is None and matched_secondary is None:
+            # The hint missed, or there was none. Fall back to the window the caller's candidate
+            # set was built from - the address may belong to an index the hint did not name, and
+            # a scan that found it must not be thrown away over a wrong guess.
+            matched_primary, matched_secondary = _matchAcross(
+                accessory.current_keys(seen_at, margin=_MAC_CANDIDATE_MARGIN), mac)
+
+        mapping = json.loads(accessoryJson)
+        stored_index = mapping.get("alignment_index")
+
+        if matched_primary is not None:
+            matched_index = matched_primary
+
+            # **A real observation, and for an offline tag the only one there will ever be.** A
+            # primary key sits at exactly one index, so a match says where the tag actually is
+            # rather than where it might be. Reported before the equality check below, because
+            # a match at the index alignment already holds is not a non-event: time has passed
+            # since that alignment was written, so the extrapolation has moved on, and a tag
+            # still sitting at the old index is precisely the drift worth knowing about.
+            _reportDrift(stored_index, mapping.get("alignment_date"),
+                         matched_index, seen_at.isoformat(), source="ble")
+
+        elif matched_secondary is not None and (
+                stored_index is None or matched_secondary > stored_index):
+            # A floor, not a fix. The true index is somewhere in this secondary key's 192-index
+            # span - `keys_at` offers each secondary at both `ind // 96 + 1` and `+ 2`, so one is
+            # reachable from two 96-blocks, which is the same 192 the margin above is derived
+            # from - and `keys_between` de-duplicates while walking indices upward, so the index
+            # paired with a key is the lowest in the searched range at which it is valid. It is
+            # therefore a lower bound, and moving alignment up to it can only ever undershoot
+            # the truth - never overshoot it, which is the direction that does damage. Raising
+            # the floor is what stops the lag growing without bound for a tag that only ever
+            # matches on its day key.
+            matched_index = matched_secondary
+        else:
+            return None
+
+        if stored_index == matched_index:
+            return None
+
+        # Bypassing update_alignment for the downward index move must not also bypass its
+        # backward-time guard: a device clock rolled back (manual change, bad carrier time)
+        # would otherwise persist a (past date, current index) pair, and once the clock
+        # corrects, the index extrapolated from that past date overshoots the true one.
+        stored_date = mapping.get("alignment_date")
+        if stored_date is not None and seen_at < datetime.fromisoformat(stored_date):
+            return None
+
+        mapping["alignment_index"] = matched_index
+        mapping["alignment_date"] = seen_at.isoformat()
+        return json.dumps(mapping)
+    except Exception:
+        print(f"recordAccessorySeen failed: {traceback.format_exc()}")
+        return None
+
+
+def _isAlignmentWide(accessory: StoredAccessory, start, end) -> int:
+    """Width of the key-index range a history fetch would search, or 0 if unknown."""
+    try:
+        return accessory.get_max_index(end) - accessory.get_min_index(start)
+    except Exception:
+        print(f"Could not determine key index width: {traceback.format_exc()}")
+        return 0
+
+
+class AccessoryFetch(NamedTuple):
+    """
+    What came back for one accessory, and whether the requested window was honoured.
+
+    `bounded_to_window` is False when the probe path ran. The probe walks backwards from now
+    until it finds anything at all, so what it returns is "the most recent location that still
+    exists" rather than "the locations inside the last N hours" - and the caller must not then
+    filter it to that window. See `_fetchReportsForAccessory`.
+    """
+    reports: list
+    bounded_to_window: bool
+
+
+def _fetchReportsForAccessory(account: AppleAccount, accessory: StoredAccessory, start, end):
+    """
+    Fetch reports for one accessory, avoiding a full-history key search when possible.
+
+    Without a key alignment record an accessory starts at index 0 from its pairing date,
+    so a history fetch searches the tag's entire life - measured at ~50,000 indices for an
+    18-month-old AirTag, which at ~290 keys per request is hundreds of round trips. That is
+    the account-flagging risk from issue #30.
+
+    When the window is that wide we ask for the latest location *instead of* the history,
+    not before it. `fetch_location` walks backwards from now and stops at the first hit, and
+    alignment is updated as a side effect of any successful fetch. So one call both returns
+    something useful and collapses the window for every fetch that follows.
+
+    Doing it as a probe *before* a history fetch was worse: for a tag with no recent reports
+    the probe traverses the whole range, finds nothing, narrows nothing, and then the history
+    fetch traverses it all over again - double the work, in the worst case rather than the
+    best. Replacing the call avoids that.
+
+    Returns an `AccessoryFetch`, because the two paths mean different things: the history path
+    honours the requested window, the probe path does not and its result must survive the
+    caller's time filter.
+    """
+    width = _isAlignmentWide(accessory, start, end)
+
+    if width > _ALIGNMENT_PROBE_THRESHOLD_INDICES:
+        print(f"Key search window is {width} indices wide; fetching latest location only, "
+              f"to establish alignment without searching the tag's whole history.")
+        latest = account.fetch_location(accessory)
+
+        narrowed = _isAlignmentWide(accessory, start, end)
+        if narrowed < width:
+            print(f"Key search window narrowed from {width} to {narrowed} indices; "
+                  f"subsequent fetches will search the narrow range.")
+        else:
+            # No report found anywhere in range. Nothing to align to, and a history fetch
+            # would search the same empty range again, so don't.
+            print("No reports found for this accessory; leaving alignment untouched and "
+                  "skipping the history fetch.")
+
+        return AccessoryFetch([latest] if latest is not None else [], bounded_to_window=False)
+
+    return AccessoryFetch(account.fetch_location_history(accessory), bounded_to_window=True)
+
+
+def _chunk(items, size):
+    """Split a list into consecutive chunks of at most `size`."""
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def _fetchReportsInRange(account: AppleAccount, accessory: StoredAccessory, start, end):
+    """
+    Fetch the reports an accessory produced inside a specific time window.
+
+    `fetch_location_history(accessory)` cannot do this. For a rolling-key accessory it calls
+    `_fetch_accessory_reports(..., only_latest=True)`, which walks backwards from *now* and
+    returns as soon as the first batch of keys yields anything - roughly the last day, since
+    an AirTag steps its index every 15 minutes and Apple takes ~290 keys per request. It also
+    takes no date range at all: 0.9.x removed the range parameters that 0.7.6 had.
+
+    So asking for last Tuesday returned today's reports, which the caller then filtered away
+    to nothing. The history screen showed data for today and empty days behind it, for every
+    tag, with no error anywhere.
+
+    What the library does expose is the two halves needed to do it properly:
+
+      * `accessory.keys_between(start, end)` yields `(index, key)` for exactly the window,
+        both primary and secondary, already de-duplicated
+      * `fetch_location_history(list_of_keys)` batches plain keys into a single request and
+        decrypts what comes back
+
+    So we generate the window's keys ourselves, ask for those, and update the accessory's
+    alignment from each report - `keys_between` tells us which index a key belongs to, which
+    is the piece `_fetch_key_reports` cannot know and therefore does not do.
+
+    Ordering note: alignment is established *before* generating keys, not after. An accessory
+    with no alignment spans a huge index range, so `keys_between` would yield tens of
+    thousands of keys for a single day. One `fetch_location` collapses that first. This is the
+    opposite order to `_fetchReportsForAccessory`, and deliberately so: there, a probe was
+    wasted work because the caller only wanted the latest report anyway; here the range is the
+    whole point, so the probe pays for itself.
+    """
+    if not _alignBeforeRangedFetch(account, accessory, start, end):
+        return []
+
+    indexed_keys = _keysForRange(accessory, start, end)
+    if not indexed_keys:
+        return []
+
+    index_by_key = {key: index for index, key in indexed_keys}
+    chunks = _chunk(indexed_keys, _MAX_KEYS_PER_REQUEST)
+
+    reports = []
+    failed = 0
+    for chunk in chunks:
+        try:
+            reports.extend(_fetchChunkAndAlign(account, accessory, chunk, index_by_key))
+        except _ChunkFetchError:
+            failed += 1
+
+    if failed == len(chunks):
+        # Every request failed, so we know nothing about this range. Returning an empty list
+        # would be indistinguishable from "Apple has no reports here", and the history screen
+        # would show a confident, wrong "0 reports" for the day. Raising lets the caller skip
+        # the accessory instead of reporting an absence it cannot vouch for.
+        raise RuntimeError(
+            f"Every request in the ranged fetch failed ({failed} of {len(chunks)}); "
+            f"refusing to report an empty range")
+
+    if failed:
+        print(f"WARNING: {failed} of {len(chunks)} requests failed; this range is incomplete")
+
+    print(f"Ranged fetch searched {len(indexed_keys)} keys in {len(chunks)} request(s)")
+    return reports
+
+
+def _alignBeforeRangedFetch(account: AppleAccount, accessory: StoredAccessory, start, end) -> bool:
+    """
+    Narrow the key index range before generating keys for it.
+
+    An accessory with no alignment spans its whole life, so `keys_between` would yield tens of
+    thousands of keys for a single day. One `fetch_location` collapses that.
+
+    @return whether the ranged fetch is worth doing at all
+    """
+    width = _isAlignmentWide(accessory, start, end)
+    if width <= _ALIGNMENT_PROBE_THRESHOLD_INDICES:
+        return True
+
+    print(f"Key search window is {width} indices wide; establishing alignment before "
+          f"fetching the requested range.")
+    account.fetch_location(accessory)
+
+    narrowed = _isAlignmentWide(accessory, start, end)
+    if narrowed >= width:
+        # Nothing was found anywhere, so there is nothing to align to and the ranged sweep
+        # would search the same empty range again.
+        print("No reports found for this accessory; skipping the ranged fetch.")
+        return False
+
+    print(f"Key search window narrowed from {width} to {narrowed} indices.")
+    return True
+
+
+def _keysForRange(accessory: StoredAccessory, start, end):
+    """The `(index, key)` pairs covering a time window, capped at what one fetch may search."""
+    try:
+        indexed_keys = list(accessory.keys_between(start, end))
+    except Exception:
+        print(f"Could not generate keys for the requested range: {traceback.format_exc()}")
+        return []
+
+    if not indexed_keys:
+        print("No keys fall inside the requested range; nothing to fetch.")
+        return []
+
+    max_keys = _MAX_KEYS_PER_REQUEST * _MAX_REQUESTS_PER_RANGE_FETCH
+    if len(indexed_keys) > max_keys:
+        # keys_between yields ascending by index, so the tail is the most recent part of the
+        # window - the part most likely to still hold reports Apple has not dropped.
+        print(f"Requested range needs {len(indexed_keys)} keys, more than the {max_keys} this "
+              f"fetch is allowed; searching only the most recent part of the range.")
+        indexed_keys = indexed_keys[-max_keys:]
+
+    return indexed_keys
+
+
+class _ChunkFetchError(Exception):
+    """One request of a ranged fetch failed, after its retries."""
+
+
+def _fetchChunkAndAlign(account: AppleAccount, accessory: StoredAccessory, chunk, index_by_key):
+    """
+    Fetch one request's worth of keys and feed what comes back into the accessory's alignment.
+
+    Retried once, because Apple's endpoint times out often enough to hit by hand. A day of
+    history is a single request, so one `aiohttp` timeout meant the whole day came back empty
+    and the screen said "0 reports" - which reads as "your tag was not seen", not "the network
+    failed".
+
+    The alignment update is the part `_fetch_key_reports` cannot do for us: it is handed plain
+    keys and has no idea which index each belongs to. We do, because `keys_between` said so.
+
+    @raise _ChunkFetchError if every attempt failed
+    """
+    keys = [key for _, key in chunk]
+    found = None
+
+    for attempt in range(1, _RANGE_FETCH_ATTEMPTS + 1):
+        try:
+            found = account.fetch_location_history(keys)
+            break
+        except Exception:
+            print(f"Request {attempt} of {_RANGE_FETCH_ATTEMPTS} for a chunk of "
+                  f"{len(keys)} keys failed: {traceback.format_exc()}")
+            if attempt < _RANGE_FETCH_ATTEMPTS:
+                time.sleep(_RANGE_FETCH_RETRY_DELAY_SECONDS)
+    else:
+        raise _ChunkFetchError(f"all {_RANGE_FETCH_ATTEMPTS} attempts failed for a chunk of "
+                               f"{len(keys)} keys")
+
+    reports = []
+    for key, key_reports in (found or {}).items():
+        for report in key_reports or []:
+            reports.append(report)
+            _updateAlignment(accessory, report, index_by_key.get(key))
+    return reports
+
+
+def _updateAlignment(accessory: StoredAccessory, report, index):
+    if index is None:
+        return
+    try:
+        accessory.update_alignment(report.timestamp, index)
+    except Exception:
+        print(f"Could not update alignment: {traceback.format_exc()}")
+
+
+def _alignmentOf(accessory: StoredAccessory):
+    """The stored (index, date) pair, or (None, None) for an accessory that has no alignment."""
+    try:
+        mapping = accessory.to_json()
+        return mapping.get("alignment_index"), mapping.get("alignment_date")
+    except Exception:
+        return None, None
+
+
+def _reportDrift(before_index, before_date, after_index, after_date, source="fetch") -> None:
+    """Says how far the extrapolation had run from where the tag turned out to be.
+
+    **The one measurement that settles how wide a search has to be.** Everything about which
+    addresses are worth scanning for rests on extrapolating the stored alignment forward at one
+    index every fifteen minutes, and on that extrapolation staying close to where the tag really
+    is. Nobody has ever measured whether it does. The candidate window, the bounded slice, how
+    far back a search should reach - all of it is currently sized by argument rather than by a
+    number.
+
+    An alignment that moved during a fetch is a real observation: something decrypted, so the new
+    pair says where the tag actually was at a moment. Extrapolating the *old* pair forward to that
+    same moment and subtracting gives the drift, as a signed number of indices, for free, on every
+    fetch that finds anything.
+
+    Positive means the extrapolation had run ahead of the tag, which is the direction that loses
+    it: the search then looks above where the tag is. Around zero over weeks would mean a tag that
+    is merely out of contact stays where the extrapolation says, and a search that widens downward
+    is solving a problem nobody has.
+
+    Compared this way rather than from a report's own index because the ordinary fetch never hands
+    one over: `fetch_location_history(accessory)` updates the alignment inside FindMy.py, so the
+    only place a report's index is visible in this file is the ranged path, which is the rarer
+    half. The before-and-after pair is visible in both.
+
+    **`source` matters more than it looks.** A fetch reading only exists for a tag the Find My
+    network has seen, and the network can search around 290 keys per request, so such a tag is
+    re-anchored long before it is ever lost. The question of how far a tag drifts is really a
+    question about the tags the network never sees - a cellar, a workshop, no passing iPhones -
+    and for those the only observation that will ever exist is a primary-key match over
+    Bluetooth. Measuring only the fetch side would answer the question for exactly the
+    population that does not have the problem.
+    """
+    if None in (before_index, before_date, after_index, after_date):
+        return
+
+    if before_index == after_index and before_date == after_date:
+        # The fetch found nothing to align to. Not a drift of zero, which is why it is not
+        # reported as one: a series full of those would read as a stable extrapolation.
+        return
+
+    try:
+        moved_by = datetime.fromisoformat(after_date) - datetime.fromisoformat(before_date)
+        extrapolated = before_index + int(moved_by // timedelta(minutes=15))
+    except Exception:
+        return
+
+    index = after_index
+
+    line = (f"Alignment drift ({source}): observed at index {index}, "
+            f"extrapolated {extrapolated}, "
+            f"drift {extrapolated - index} index/indices "
+            f"({(extrapolated - index) / 4:.1f} hours ahead)")
+
+    print(line)
+    _appendDiagnostic(line)
+
+
+#: Where diagnostics are appended, set once by Java. None means logcat only.
+_DIAGNOSTICS_PATH = None
+
+#: Past this the file is halved, oldest first. A drift line is about 110 bytes, so this keeps
+#: something like the last thousand readings - months of fetches, and still nothing to notice.
+_DIAGNOSTICS_MAX_BYTES = 128 * 1024
+
+
+def setDiagnosticsPath(path: str) -> None:
+    """Point diagnostics at a file, so a measurement outlives the logcat ring buffer.
+
+    **Because the alternative was asking somebody to leave a phone plugged in.** The drift
+    measurement is only worth anything as a series over weeks, and logcat on a busy device
+    holds minutes. Java passes a directory it can reach without root - its own external files
+    directory - so the file can be pulled whenever the phone next happens to be connected.
+    """
+    global _DIAGNOSTICS_PATH
+    _DIAGNOSTICS_PATH = os.path.join(path, "diagnostics.log") if path else None
+
+
+def _appendDiagnostic(line: str) -> None:
+    """Adds one timestamped line, halving the file if it has grown past the cap.
+
+    Never raises. A diagnostic that can break the thing it is measuring is worse than no
+    diagnostic, and this sits directly in the fetch path.
+    """
+    path = _DIAGNOSTICS_PATH
+    if not path:
+        return
+
+    try:
+        stamped = f"{datetime.now(timezone.utc).isoformat(timespec='seconds')} {line}\n"
+
+        if os.path.exists(path) and os.path.getsize(path) > _DIAGNOSTICS_MAX_BYTES:
+            with open(path, "r", encoding="utf-8", errors="replace") as existing:
+                kept = existing.readlines()
+            with open(path, "w", encoding="utf-8") as trimmed:
+                trimmed.writelines(kept[len(kept) // 2:])
+
+        with open(path, "a", encoding="utf-8") as out:
+            out.write(stamped)
+    except Exception:
+        print(f"Could not write a diagnostic line: {traceback.format_exc()}")
+
+
+def _serializeReports(reports):
+    """
+    Map FindMy 0.9.x LocationReport objects to the dict shape Java's mapResults expects.
+    Note: `published_at` and `description` no longer exist on LocationReport in 0.9.x; we
+    fall back to `timestamp` and an empty string respectively. Java's BeaconLocationReport
+    can absorb that without changes.
+    """
+    items = []
+    for report in sorted(reports):
+        items.append({
+            "publishedAt": _toUnixEpochMs(report.timestamp),
+            "description": getattr(report, "description", "") or "",
+            "timestamp": _toUnixEpochMs(report.timestamp),
+            "confidence": report.confidence,
+            "latitude": report.latitude,
+            "longitude": report.longitude,
+            "horizontalAccuracy": report.horizontal_accuracy,
+            "status": report.status
+        })
+    return items
+
+
+def _resultOrError(res: dict, failures: int, num_items: int) -> dict | None:
+    """
+    Decide whether a short result is an answer or a failure.
+
+    Java's `mapResults` only raises when this module returns None; a dict missing a beacon
+    reads as "that beacon has no reports". So swallowing every failure and returning a partial
+    dict told the history screen, with complete confidence, that a day it had failed to fetch
+    was a day the tag was not seen - no error state, and no Retry button, because as far as
+    Java was concerned the call succeeded.
+
+    A partial result is still worth returning: the accessories that did answer have fresh
+    reports and, more importantly, updated alignment worth persisting.
+    """
+    if num_items and failures == num_items:
+        print(f"Every accessory failed ({failures} of {num_items}); reporting an error rather "
+              f"than an empty result.")
+        return None
+
+    if failures:
+        print(f"WARNING: {failures} of {num_items} accessories failed; result is incomplete")
+
+    return res
+
+
+def getLastReports(
+        account: AppleAccount,
+        idToAccessoryData,
+        hoursBack: int) -> dict | None:
+    """
+    Fetch the most recent reports for each beacon over the requested time window.
+
+    `idToAccessoryData` is a List<AccessoryRequest> from Java where each element exposes
+    getBeaconId() / getAccessoryJson() (the persisted FindMyAccessory JSON).
+
+    Each entry in the result dict carries:
+      - "reports": list of report dicts (same shape as before)
+      - "updatedAccessoryJson": JSON string of the accessory AFTER fetch — Java must
+        write this back to OwnedBeacon.accessory_json so the rolling key alignment
+        survives across calls (this is the issue #30 fix).
+    """
+    try:
+        res = {}
+
+        num_items = idToAccessoryData.size()
+        print(f"getLastReports: num_items={num_items}, hoursBack={hoursBack}")
+
+        now_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+        start_ms = now_ms - (hoursBack * 60 * 60 * 1000)
+        failures = 0
+
+        for i in range(0, num_items):
+            req = idToAccessoryData.get(i)
+            beaconId = req.getBeaconId()
+            accessoryJson = req.getAccessoryJson()
+
+            print(f"Fetching report for {beaconId} for the last {hoursBack} hours...")
+
+            airtag = accessoryFromJson(accessoryJson)
+            start_dt = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+            now_dt = datetime.fromtimestamp(now_ms / 1000, tz=timezone.utc)
+
+            # Measured before and after, because "found nothing" on its own says nothing.
+            # See _DEAD_TAG_WIDTH_INDICES.
+            width_before = _isAlignmentWide(airtag, start_dt, now_dt)
+            aligned_before = _alignmentOf(airtag)
+
+            # Per-accessory isolation. One beacon failing used to abort the whole call,
+            # which meant no beacon's updated alignment was persisted - so every later
+            # fetch started from the same wide range again and never converged.
+            try:
+                fetched = _fetchReportsForAccessory(account, airtag, start_dt, now_dt)
+                reports = fetched.reports or []
+            except Exception:
+                failures += 1
+                print(f"Fetch failed for {beaconId}, continuing with the rest: "
+                      f"{traceback.format_exc()}")
+                continue
+
+            print(f"Got {len(reports)} raw reports for {beaconId}")
+
+            # Log the age of the newest one, not only the count. A fetch that succeeds while
+            # Apple's newest report is hours old means the network genuinely holds nothing
+            # newer - the "stale map with no error anywhere" case - and a count alone cannot
+            # tell that from a fetch that returned something fresh.
+            if reports:
+                newest_ms = max(int(r.timestamp.timestamp() * 1000) for r in reports)
+                age_min = max(0, (now_ms - newest_ms) // 60000)
+                age = f"{age_min} min" if age_min < 180 else f"{age_min / 60:.1f} h"
+                newest_iso = datetime.fromtimestamp(
+                    newest_ms / 1000, tz=timezone.utc).isoformat(timespec="seconds")
+                print(f"  -> newest report is {age} old ({newest_iso})")
+
+            # Measured here because this is the one place both halves are in scope: what the
+            # alignment said before anything was fetched, and what the fetch made of it.
+            aligned_after = _alignmentOf(airtag)
+            _reportDrift(aligned_before[0], aligned_before[1],
+                         aligned_after[0], aligned_after[1])
+
+            # A search that stayed as wide as it started found nothing to align to, which is
+            # the difference between "no reports in the window asked for" and "no reports at
+            # all, anywhere in this tag's life".
+            width_after = _isAlignmentWide(airtag, start_dt, now_dt)
+            exhausted = (
+                not reports
+                and width_before > _DEAD_TAG_WIDTH_INDICES
+                and width_after >= width_before
+            )
+            if exhausted:
+                print(f"{beaconId} has nothing anywhere in {width_before} indices of history;"
+                      f" reporting it as one that appears to have stopped broadcasting.")
+
+            # **Everything found is kept, including reports older than the window.**
+            #
+            # They used to be dropped here, and that was throwing away the expensive part of
+            # the work. The window is a *key* range, not a time range: keys roll every fifteen
+            # minutes, so asking about the last hour asks Apple about a handful of key indices,
+            # and Apple answers with every report it holds for them - which routinely includes
+            # sightings timestamped before the window opened. Those reports have already been
+            # searched for, downloaded and decrypted by the time this line runs. Discarding
+            # them threw all of that away and left a hole in the stored history that the
+            # history screen would later pay to fetch again.
+            #
+            # Nothing downstream minds the extra. The cache de-duplicates on
+            # beacon id plus report (BeaconLocationReportHasher), the map draws the newest
+            # report rather than all of them, and the history screen merges by day. So this is
+            # additive: the same last-known position, with the gaps filled in for free.
+            in_window = len(_filterReportsByTimeRange(reports, start_ms, now_ms))
+            filtered = reports
+
+            if not fetched.bounded_to_window:
+                # The probe ignores the window on purpose - it walks back until it finds
+                # anything at all - so a tag that sat in a drawer for two days is normal here.
+                print(f"  -> keeping {len(filtered)} latest-known report(s); alignment was not "
+                      f"yet established, so the {hoursBack}h window was never applied")
+            elif len(filtered) > in_window:
+                print(f"  -> keeping {len(filtered)} reports, of which {in_window} fall inside "
+                      f"the last {hoursBack}h; the rest are older sightings for the same keys "
+                      f"and are kept rather than re-fetched later")
+            else:
+                print(f"  -> {len(filtered)} reports, all within the last {hoursBack}h")
+
+            res[beaconId] = {
+                "reports": _serializeReports(filtered),
+                # Always written, even when there were no reports: the alignment may still
+                # have moved, and persisting it is what stops the next fetch re-searching.
+                "updatedAccessoryJson": json.dumps(airtag.to_json()),
+                # **Both of these have to be here, not only on the ranged variant.**
+                #
+                # This is the function the periodic refresh calls, and the backoff is about the
+                # periodic refresh. Java reads these two keys to decide whether a tag is going
+                # quiet, and a missing key reads as False - so emitting them from the ranged
+                # variant alone silently disabled the whole backoff, with every empty answer
+                # counting as a healthy one. See PythonAppleService#toFetchResult.
+                #
+                # (An earlier version of this note claimed `getReports` had no Java caller at
+                # all. It does: PythonAppleService#getReportsBetween, which is how the history
+                # screen fetches one day.)
+                "exhaustedWideSearch": exhausted,
+                # Whether this search was an expensive one at all. An accessory with a narrow
+                # key window costs a request or two, and an empty answer from one means only
+                # "nothing new in the window asked for" - the ordinary state of a tag that
+                # reported an hour ago and has not moved.
+                "wideSearch": width_before > _ALIGNMENT_PROBE_THRESHOLD_INDICES,
+            }
+
+        return _resultOrError(res, failures, num_items)
+
+    except Exception:
+        err = traceback.format_exc()
+        print(f"Failed to fetch all reports due to error: {err}")
+        return None
+
+
+def getReports(
+        account: AppleAccount,
+        idToAccessoryData,
+        unixStartMs: int,
+        unixEndMs: int) -> dict | None:
+    """
+    Time-range variant. Apple's network only retains ~7 days of history; ranges further
+    back than that will return empty (the local Room cache is already the canonical store
+    for older history via DailyHistoryFetchRecord).
+
+    Same input/output shape as `getLastReports`.
+    """
+    try:
+        res = {}
+
+        num_items = idToAccessoryData.size()
+        print(f"getReports: num_items={num_items}, range=[{unixStartMs}, {unixEndMs}]")
+        failures = 0
+
+        for i in range(0, num_items):
+            req = idToAccessoryData.get(i)
+            beaconId = req.getBeaconId()
+            accessoryJson = req.getAccessoryJson()
+
+            print(f"Fetching report for {beaconId} in time range {unixStartMs}-{unixEndMs}...")
+
+            airtag = accessoryFromJson(accessoryJson)
+            start_dt = datetime.fromtimestamp(unixStartMs / 1000, tz=timezone.utc)
+            end_dt = datetime.fromtimestamp(unixEndMs / 1000, tz=timezone.utc)
+
+            # Measured before and after, because "found nothing" on its own says nothing.
+            # See _DEAD_TAG_WIDTH_INDICES.
+            width_before = _isAlignmentWide(airtag, start_dt, end_dt)
+
+            try:
+                reports = _fetchReportsInRange(account, airtag, start_dt, end_dt) or []
+            except Exception:
+                failures += 1
+                print(f"Fetch failed for {beaconId}, continuing with the rest: "
+                      f"{traceback.format_exc()}")
+                continue
+            print(f"Got {len(reports)} raw reports for {beaconId}")
+
+            # A search that stayed as wide as it started found nothing to align to, which is the
+            # difference between "no reports in the window asked for" and "no reports at all,
+            # anywhere in this tag's life".
+            width_after = _isAlignmentWide(airtag, start_dt, end_dt)
+            exhausted = (
+                not reports
+                and width_before > _DEAD_TAG_WIDTH_INDICES
+                and width_after >= width_before
+            )
+            if exhausted:
+                print(f"{beaconId} has nothing anywhere in {width_before} indices of history;"
+                      f" reporting it as one that appears to have stopped broadcasting.")
+
+            # **Everything found is returned, in range or not.** Same reasoning as
+            # `getLastReports`: the search is over key indices, keys roll every fifteen minutes,
+            # and Apple answers with every report it holds for the keys asked about - so a fetch
+            # for one day routinely turns up sightings either side of it. Those cost exactly as
+            # much to find and decrypt as the in-range ones, and dropping them here means the
+            # next day the user opens pays to fetch them all over again.
+            #
+            # Anything fetched belongs in the database. Narrowing to the day the user is looking
+            # at is a display concern, and it is done where the display is - see
+            # `HistoryViewActivity.fetchReports`, which filters the remote answer before merging
+            # it, and reads the local half through a day-bounded query.
+            in_range = len(_filterReportsByTimeRange(reports, unixStartMs, unixEndMs))
+            filtered = reports
+
+            if len(filtered) > in_range:
+                print(f"  -> keeping {len(filtered)} reports, of which {in_range} fall in the "
+                      f"requested range; the rest are sightings either side of it for the same "
+                      f"keys and are stored rather than re-fetched later")
+            else:
+                print(f"  -> {len(filtered)} reports, all within the requested range")
+
+            updated_accessory_json = json.dumps(airtag.to_json())
+
+            res[beaconId] = {
+                "reports": _serializeReports(filtered),
+                "updatedAccessoryJson": updated_accessory_json,
+                # Java decides what to do about it; this only reports what was searched.
+                "exhaustedWideSearch": exhausted,
+                # **Whether this search was an expensive one at all.**
+                #
+                # An accessory with a narrow key window costs a request or two, and an empty
+                # answer from one means only "nothing new in the window asked for" - which is
+                # the ordinary state of a tag that reported an hour ago and has not moved. Java
+                # must not count that against it, or a tag updating happily every day slowly
+                # accrues strikes and starts being asked less often for no reason.
+                "wideSearch": width_before > _ALIGNMENT_PROBE_THRESHOLD_INDICES,
+            }
+
+        return _resultOrError(res, failures, num_items)
+
+    except Exception:
+        err = traceback.format_exc()
+        print(f"Failed to fetch all reports due to error: {err}")
+        return None
+
+
+def identifyHardware(plistXml: str) -> str | None:
+    """
+    Say what an accessory is, from the `OwnedBeacons` plist the app already holds.
+
+    **The heuristic lives in `opentagviewer_export.hardware`, not here and not in Java.** It is
+    guesswork over half a dozen fields - product and vendor ids, the model, the shape of
+    `stableIdentifier` - and the same guesswork runs in the desktop exporter when it asks which
+    accessories to export. Two copies of it would drift, and the symptom of drift is one tag
+    described as an AirTag in one place and as a hex number in the other.
+
+    Returns None when nothing recognises the record, which is a real answer: the caller should
+    then show what it already has rather than a guess.
+
+    :param plistXml: The accessory's plist, as the app stores it.
+    """
+    try:
+        from opentagviewer_export.hardware import identify
+
+        return identify(util_files.read_data_plist(plistXml.encode("utf-8")))
+    except Exception:
+        # Never fatal: this is a label. An import failing here should cost a nicer row in a list,
+        # not the accessory.
+        print(f"identifyHardware failed, carrying on without it: {traceback.format_exc()}")
+        return None
+
+
+def whereToLookUpHardware(plistXml: str) -> str | None:
+    """
+    How the user could find out what an unrecognised accessory is, in one line.
+
+    Offered rather than guessed at - see `opentagviewer_export.hardware.where_to_look_up`. Returns
+    None when there is nothing worth saying, which is the common case.
+    """
+    try:
+        from opentagviewer_export.hardware import where_to_look_up
+
+        return where_to_look_up(util_files.read_data_plist(plistXml.encode("utf-8")))
+    except Exception:
+        print(f"whereToLookUpHardware failed, carrying on without it: {traceback.format_exc()}")
+        return None
+
+
+def isOwnDeviceHardware(plistXml: str) -> str | None:
+    """
+    Whether this record is one of the owner's own devices rather than an accessory.
+
+    **What decides whether a rename writes to iCloud or stays a local nickname.** See
+    `opentagviewer_export.hardware.is_own_device`, and `icloud_bridge.ICloudSession.rename`, which
+    asks the same question again before writing - this one shapes the screen, that one is the
+    guard.
+
+    Returns `"True"` or `"False"` as a string, and **None when it could not be established**,
+    which is not the same as False. A record that will not parse must leave the caller cautious
+    rather than confidently writing to somebody's account.
+    """
+    try:
+        from opentagviewer_export.hardware import is_own_device
+
+        return str(is_own_device(util_files.read_data_plist(plistXml.encode("utf-8"))))
+    except Exception:
+        print(f"isOwnDeviceHardware failed, carrying on without it: {traceback.format_exc()}")
+        return None
+
+
+def buildExportBundle(
+    accessoriesJson: str,
+    via: str,
+    sourceUser: str,
+    exportedAtMs: int,
+) -> str:
+    """
+    Build the files of an export bundle, for the app to zip.
+
+    **The app is the third producer of this format**, beside the desktop wizard and its CLI, and
+    it writes through the same `opentagviewer_export.build_export` they do. One implementation of
+    the format is most of why that package exists: a second one in Java would drift, and the
+    symptom of drift is a bundle that imports into one version of this app and not another.
+
+    **It returns the files rather than a zip, deliberately.** `zipsink.write_zip` needs
+    `pyzipper` for an encrypted archive, which is not in Chaquopy's pip list and pulls a native
+    crypto dependency; the app already carries zip4j for *reading* locked bundles, and zip4j
+    writes them too. So Python owns the format and Java owns the container, which is the split
+    that costs nothing.
+
+    Base64 over JSON because these are bytes crossing a language boundary. A plist is not UTF-8
+    and must not be round-tripped through a string - `OwnedBeacons` records carry raw key
+    material, and a lossy decode there produces a bundle that imports and then cannot locate
+    anything, which is the worst kind of failure this could have.
+
+    :param accessoriesJson: A JSON list of objects with `ownedBeaconPlist` and
+        `namingRecordPlist`, each an XML plist as the app stores it, and optionally
+        `alignmentPlist`. The naming record is **not** optional: the importer inner-joins the two
+        and silently drops an accessory it cannot pair with one.
+    :param via: `OpenTagViewer.android:<versionName>`. Passed from Java rather than built here,
+        because `build_export` refuses to invent it and the version lives in `BuildConfig`.
+    :param sourceUser: What the recipient sees as "exported by". A label, never an Apple ID.
+    :param exportedAtMs: Milliseconds since the epoch, passed rather than read from the clock.
+    :returns: JSON. On success, `entries` maps each path in the zip to its base64 content, and
+        `warning` is present if something optional had to be left out. On failure, `error` carries
+        a sentence to show the user.
+    """
+    import base64
+    import plistlib
+
+    from opentagviewer_export import AccessoryExport, ExportError, build_export
+
+    try:
+        accessories = []
+        for item in json.loads(accessoriesJson):
+            alignment = item.get("alignmentPlist")
+            accessories.append(
+                AccessoryExport(
+                    owned_beacon=plistlib.loads(item["ownedBeaconPlist"].encode("utf-8")),
+                    naming_record=plistlib.loads(item["namingRecordPlist"].encode("utf-8")),
+                    # Absence is normal - not every accessory has one - but passing it whenever
+                    # there is one is what stops the recipient's first fetch searching the tag's
+                    # entire key history. See rule 6.
+                    key_alignment_record=(
+                        plistlib.loads(alignment.encode("utf-8")) if alignment else None
+                    ),
+                ),
+            )
+    except Exception:
+        print(f"Could not read the accessories to export: {traceback.format_exc()}")
+        return json.dumps({"error": "The bundle could not be built."})
+
+    try:
+        bundle = build_export(
+            accessories, via=via, source_user=sourceUser, exported_at_ms=exportedAtMs,
+        )
+        warning = None
+    except ExportError as refused:
+        bundle, warning = _withoutTheAlignmentRecords(
+            accessories, refused, via, sourceUser, exportedAtMs,
+        )
+        if bundle is None:
+            # Handed back rather than raised: the caller shows it, and a Chaquopy traceback is
+            # not a sentence anybody can act on.
+            return json.dumps({"error": warning})
+    except Exception:
+        print(f"Failed to build an export bundle: {traceback.format_exc()}")
+        return json.dumps({"error": "The bundle could not be built."})
+
+    answer: dict[str, Any] = {
+        "entries": {
+            name: base64.b64encode(content).decode("ascii")
+            for name, content in bundle.entries.items()
+        },
+    }
+    if warning:
+        answer["warning"] = warning
+
+    return json.dumps(answer)
+
+
+def _withoutTheAlignmentRecords(accessories, refused, via, sourceUser, exportedAtMs):
+    """
+    Try again with the optional half dropped, because the alternative is exporting nothing.
+
+    **The format layer's own error asks for this.** It says "pass no alignment record at all
+    rather than an unreadable one: the import is then slow, not broken" - and it is right, so the
+    caller should act on it rather than relay it. An alignment record is an optimisation: without
+    one the recipient's first fetch searches the tag's whole key history, which is slow and looks
+    like abuse of the account, but it works. Refusing the whole export because an optional record
+    is malformed trades something that works badly for nothing at all.
+
+    Only worth attempting when there was one to drop. Otherwise the refusal is about the
+    accessories themselves - no key material, a missing naming record - and retrying changes
+    nothing.
+
+    :returns: `(bundle, warning)` on success, or `(None, message)` when it still cannot be built.
+    """
+    from dataclasses import replace
+
+    from opentagviewer_export import ExportError, build_export
+
+    if not any(a.key_alignment_record is not None for a in accessories):
+        return None, str(refused)
+
+    try:
+        bundle = build_export(
+            [replace(a, key_alignment_record=None) for a in accessories],
+            via=via,
+            source_user=sourceUser,
+            exported_at_ms=exportedAtMs,
+        )
+    except ExportError:
+        # Not the alignment records after all. Report the first refusal, which is the one that
+        # describes what is actually wrong.
+        return None, str(refused)
+
+    print(f"Exporting without the key alignment records, which were unusable: {refused}")
+
+    return bundle, str(refused)

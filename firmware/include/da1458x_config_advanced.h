@@ -1,0 +1,52 @@
+#ifndef DA1458X_CONFIG_ADVANCED_H
+#define DA1458X_CONFIG_ADVANCED_H
+
+/* DA14531 values from the SDK ble_app_noncon da14531_config_advanced.h. */
+#include "da1458x_stack_config.h"
+
+/* No 32 kHz crystal on this board. */
+#define CFG_LP_CLK              LP_CLK_RCX20
+
+#define CFG_MAX_SLEEP_DURATION_PERIODIC_WAKEUP_MS   500
+#define CFG_MAX_SLEEP_DURATION_EXTERNAL_WAKEUP_MS   600000
+#undef CFG_EXTERNAL_WAKEUP
+#undef CFG_WAKEUP_EXT_PROCESSOR
+
+#define CFG_TRNG
+#undef CFG_ENABLE_SMP_SECURE
+#define CFG_USE_CHACHA20_RAND
+
+#define CFG_NVDS_TAG_BD_ADDRESS             {0x15, 0x00, 0xF4, 0x35, 0x23, 0x48}
+#define CFG_NVDS_TAG_LPCLK_DRIFT            DRIFT_500PPM
+#define CFG_NVDS_TAG_BLE_CA_TIMER_DUR       (500)
+#define CFG_NVDS_TAG_BLE_CRA_TIMER_DUR      (8)
+#define CFG_NVDS_TAG_BLE_CA_MIN_RSSI        (-60)
+#define CFG_NVDS_TAG_BLE_CA_NB_PKT          (20)
+#define CFG_NVDS_TAG_BLE_CA_NB_BAD_PKT      (CFG_NVDS_TAG_BLE_CA_NB_PKT/2)
+
+#undef CFG_BLE_METRICS
+#undef CFG_PRODUCTION_DEBUG_OUTPUT
+
+#define CFG_MAX_TX_PACKET_LENGTH        (251)
+#define CFG_MAX_RX_PACKET_LENGTH        (251)
+#define CFG_USE_H4TL                    (0)
+#define CFG_BLE_DUPLICATE_FILTER_MAX    (10)
+#undef CFG_BLE_DUPLICATE_FILTER_FOUND
+#define CFG_LLM_RESOLVING_LIST_MAX      LLM_RESOLVING_LIST_MAX
+#undef AUTO_DATA_LENGTH_NEGOTIATION_UPON_NEW_CONNECTION
+
+#define CFG_RET_DATA_SIZE           (2048)
+#define CFG_RET_DATA_UNINIT_SIZE    (0)
+/* Code runs from RAM (loaded from SPI Flash), so RAM blocks 1 and 2 are retained. */
+#define CFG_RETAIN_RAM_1_BLOCK
+#define CFG_RETAIN_RAM_2_BLOCK
+#define CFG_AUTO_DETECT_NON_RET_HEAP
+
+#define CFG_CODE_LOCATION_EXT
+#undef CFG_CODE_LOCATION_OTP
+#undef CFG_CODE_SIZE_FOR_OTP_COPY_ON
+
+#define CFG_AMB_TEMPERATURE
+#define CFG_DISABLE_QUADEC_ON_START_UP
+
+#endif

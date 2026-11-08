@@ -1,0 +1,1883 @@
+"""Tests for the Chaquopy bridge module (app/src/main/python/main.py).
+
+These run on plain CPython - no Android, no emulator, no Apple account - and
+cover the parts of the FindMy 0.9.x migration that are pure logic:
+
+  * converting an exported plist to the accessory JSON the new library needs
+  * the client-side time filtering that replaced 0.7.6's server-side windowing
+  * the alignment probe that keeps the first fetch after an upgrade from
+    hammering Apple with hundreds of requests
+"""
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import asyncio
+import json
+import re
+
+import pytest
+
+import main
+from findmy.keys import KeyPairType
+
+RESOURCES = Path(__file__).resolve().parents[1] / "resources"
+BEACON_PLISTS = sorted(RESOURCES.glob("*/OwnedBeacons/*.plist"))
+
+
+def _read_plist_xml(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+class FakeReport:
+    """Minimal stand-in for findmy LocationReport - only what _serialize/_filter touch."""
+
+    def __init__(self, timestamp, latitude=52.0, longitude=4.0):
+        self.timestamp = timestamp
+        self.latitude = latitude
+        self.longitude = longitude
+        self.confidence = 2
+        self.horizontal_accuracy = 10
+        self.status = 0
+
+    # sorted() is called on these in _serializeReports
+    def __lt__(self, other):
+        return self.timestamp < other.timestamp
+
+
+def _ms(dt: datetime) -> int:
+    return int(dt.timestamp() * 1000)
+
+
+# --------------------------------------------------------------------------
+# convertPlistToJson
+# --------------------------------------------------------------------------
+
+@pytest.mark.skipif(not BEACON_PLISTS, reason="no redacted beacon fixture available")
+@pytest.mark.parametrize("plist_path", BEACON_PLISTS, ids=lambda p: p.parent.parent.name)
+def test_convertPlistToJson_produces_restorable_json(plist_path):
+    """The exact path a pre-0.9 beacon takes during the lazy backfill."""
+    result = main.convertPlistToJson(_read_plist_xml(plist_path))
+
+    assert result is not None, "a real exported plist must convert"
+    parsed = json.loads(result)
+    assert parsed.get("type") == "accessory"
+
+    # Must survive the DB round trip: this JSON is stored in accessory_json and
+    # read back via from_json on every subsequent fetch.
+    from findmy import FindMyAccessory
+    restored = FindMyAccessory.from_json(parsed)
+    assert restored is not None
+
+
+# --------------------------------------------------------------------------
+# accessoryFromJson
+#
+# Two kinds of tag now reach the fetch path, and they are sibling classes rather than
+# a base and a subclass: an Apple-paired accessory derives its keys from a master key
+# and two secrets, a self-generated one carries a plain list and derives nothing.
+# FindMy.py has no factory that reads both, so the dispatch is ours - which makes
+# "does an existing user's stored tag still load" a question worth asking out loud.
+# --------------------------------------------------------------------------
+
+_CUSTOM_ACCESSORY = {
+    "type": "custom_rolling_key_accessory",
+    # Two 28-byte private keys, which is the size FindMy.py's KeyPair expects.
+    "private_keys": ["11" * 28, "22" * 28],
+    "name": "A tag nobody paired",
+    "identifier": "openhaystack-1",
+}
+
+
+@pytest.mark.skipif(not BEACON_PLISTS, reason="no redacted beacon fixture available")
+def test_an_apple_paired_tag_still_loads():
+    """
+    The upgrade case, and the one with something to lose.
+
+    Every beacon an existing user has is stored as this. If the dispatch got it wrong they
+    would all stop locating at once, on a build that installed cleanly.
+    """
+    stored = main.convertPlistToJson(_read_plist_xml(BEACON_PLISTS[0]))
+
+    accessory = main.accessoryFromJson(stored)
+
+    assert isinstance(accessory, main.FindMyAccessory)
+    # Round-trips through the same door it came out of, which is what the fetch path does
+    # after every call to persist the updated alignment.
+    assert main.accessoryFromJson(json.dumps(accessory.to_json())) is not None
+
+
+def test_a_self_generated_tag_loads_as_the_other_kind():
+    accessory = main.accessoryFromJson(json.dumps(_CUSTOM_ACCESSORY))
+
+    assert isinstance(accessory, main.FixedRollingKeyPairAccessory)
+    assert accessory.identifier == "openhaystack-1"
+    assert accessory.name == "A tag nobody paired"
+
+
+def test_a_self_generated_tag_survives_the_round_trip_the_fetch_path_makes():
+    """
+    `getLastReports` writes `to_json()` back to the database after every fetch, so a tag that
+    reads but does not re-read would work once and then be unreadable - a failure that only
+    appears on the *second* refresh.
+    """
+    once = main.accessoryFromJson(json.dumps(_CUSTOM_ACCESSORY))
+    twice = main.accessoryFromJson(json.dumps(once.to_json()))
+
+    assert twice.identifier == once.identifier
+    assert list(twice.keys_between(
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )) == list(once.keys_between(
+        datetime(2026, 1, 1, tzinfo=timezone.utc),
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+    ))
+
+
+def test_both_kinds_offer_everything_the_fetch_path_uses():
+    """
+    The reason the rest of the fetch path never learns which kind it has.
+
+    If a future library version moved one of these off one of the two classes, the fetch would
+    fail at runtime for that kind only - and only for whoever owns that kind of tag.
+    """
+    for accessoryType in main.ACCESSORY_TYPES.values():
+        for method in ("keys_between", "get_min_index", "get_max_index",
+                       "update_alignment", "to_json", "from_json"):
+            assert hasattr(accessoryType, method), f"{accessoryType.__name__} lost {method}"
+
+
+def test_an_unknown_type_is_refused_rather_than_guessed_at():
+    """
+    Loud, because the quiet alternative is worse.
+
+    Guessing would fetch against keys from a different derivation, which finds nothing and
+    reads as a tag that is simply out of range rather than as a bug.
+    """
+    with pytest.raises(ValueError) as raised:
+        main.accessoryFromJson(json.dumps({"type": "something_from_the_future"}))
+
+    assert "something_from_the_future" in str(raised.value)
+
+
+@pytest.mark.parametrize("blob", ['{"no": "type"}', '"a string"', "null", "[]"])
+def test_json_that_is_not_an_accessory_is_refused(blob):
+    with pytest.raises(ValueError):
+        main.accessoryFromJson(blob)
+
+
+# --------------------------------------------------------------------------
+# currentMacAddresses
+#
+# The BLE MAC address(es) an accessory might currently be advertising - what
+# dev.wander.android.opentagviewer.ble matches a scan result against to trigger an owned
+# accessory's sound directly, without going through Apple's Find My network.
+# --------------------------------------------------------------------------
+
+_MAC_RE = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
+
+
+def test_current_mac_addresses_for_a_self_generated_tag():
+    macs = main.currentMacAddresses(json.dumps(_CUSTOM_ACCESSORY))
+
+    assert macs is not None
+    assert len(macs) > 0
+    for mac in macs:
+        assert _MAC_RE.match(mac), f"{mac!r} is not a MAC address"
+
+
+def test_current_mac_addresses_is_deterministic_for_a_fixed_key_tag():
+    """A self-generated tag's keys don't rotate, so asking twice must agree - unlike an Apple-
+    paired one, where this is only true at the exact same instant (rollover happens meanwhile)."""
+    once = main.currentMacAddresses(json.dumps(_CUSTOM_ACCESSORY))
+    twice = main.currentMacAddresses(json.dumps(_CUSTOM_ACCESSORY))
+
+    assert once == twice
+
+
+def test_current_mac_addresses_returns_none_on_garbage():
+    """Failure must be None, not an exception - see AccessoryMacResolver's Java contract, which
+    reads None the same way as an empty answer: nothing to scan for yet."""
+    assert main.currentMacAddresses("not an accessory at all") is None
+
+
+def test_current_mac_addresses_refuses_an_unknown_accessory_type():
+    assert main.currentMacAddresses(
+        json.dumps({"type": "something_from_the_future"})) is None
+
+
+def _unaligned_accessory(paired_at: datetime) -> dict:
+    """An accessory that has never been aligned - what an owner's own Apple device looks like.
+
+    A phone reaches this code through "show my own Apple devices"; it has no rolling-key
+    alignment record and never gains one, so its candidate window spans its whole life.
+    """
+    from findmy import FindMyAccessory
+
+    accessory = FindMyAccessory(
+        master_key=b"\x11" * 28,
+        skn=b"\x22" * 32,
+        sks=b"\x33" * 32,
+        paired_at=paired_at,
+        name="Something with no alignment",
+    )
+    return accessory.to_json()
+
+
+def test_current_mac_addresses_bounds_a_window_too_wide_to_derive():
+    """Bounded rather than derived whole, and bounded *here*.
+
+    The caller asks per accessory in a loop, and the derivation is blocking. Measured on a real
+    device that had been switched off: 39636 indices, over a year of keys - the loop never
+    reached the tags after it, so the scan never started and every real tag silently stopped
+    being seen. A caller cannot protect itself from this, because by the time it could measure
+    the answer the work is already done.
+    """
+    stored = _unaligned_accessory(datetime.now(timezone.utc) - timedelta(days=400))
+
+    macs = main.currentMacAddresses(json.dumps(stored))
+
+    assert macs is not None and macs, "a never-aligned tag must still be scannable for"
+    spanned = max(macs.values()) - min(macs.values())
+    assert spanned <= main._MAC_CANDIDATE_MAX_INDICES, (
+        f"derived {spanned} indices, past the bound")
+
+
+def test_current_mac_addresses_bounds_to_the_newest_indices():
+    """The newest end, not the oldest.
+
+    An accessory advertising right now has been running, so its index tracks the wall clock.
+    The bottom of an over-wide window belongs to a tag that was off for months, which is not
+    advertising at all - deriving that end would spend the whole budget where nothing can match.
+    """
+    stored = _unaligned_accessory(datetime.now(timezone.utc) - timedelta(days=400))
+    accessory = main.accessoryFromJson(json.dumps(stored))
+    reachable_now = accessory.get_max_index(
+        datetime.now(timezone.utc) + main._MAC_CANDIDATE_MARGIN)
+
+    macs = main.currentMacAddresses(json.dumps(stored))
+
+    assert max(macs.values()) >= reachable_now - 1, (
+        "the newest reachable index must be inside the derived set")
+
+
+def _freshly_aligned_accessory() -> dict:
+    """An accessory aligned as of now, which is what any tag the network found looks like."""
+    from findmy import FindMyAccessory
+
+    now = datetime.now(timezone.utc)
+    accessory = FindMyAccessory(
+        master_key=b"\x11" * 28,
+        skn=b"\x22" * 32,
+        sks=b"\x33" * 32,
+        paired_at=now - timedelta(days=200),
+        name="A tag the network found this morning",
+        alignment_date=now,
+        alignment_index=19200,
+    )
+    return accessory.to_json()
+
+
+def test_current_mac_addresses_still_answers_for_a_freshly_aligned_accessory():
+    """The guard must not swallow the ordinary case it sits in front of.
+
+    Note this one is paired 200 days ago: it is the *alignment* being current that keeps the
+    window narrow, not the tag being new.
+    """
+    macs = main.currentMacAddresses(json.dumps(_freshly_aligned_accessory()))
+
+    assert macs is not None
+    assert len(macs) > 0
+
+
+def test_current_mac_addresses_bounds_an_accessory_whose_alignment_went_stale():
+    """Staleness is what sets the width, so an old alignment is bounded like none at all.
+
+    Deriving such a window whole took 9 seconds at 30 days stale and two minutes at 400 on a
+    desktop, per the table on `_MAC_CANDIDATE_MAX_INDICES` - several times that under Chaquopy.
+    The bound keeps the tag scannable without paying for the part of the range that cannot be
+    live.
+    """
+    stored = _paired_accessory(alignment_index=100)  # aligned at a fixed date in the past
+
+    macs = main.currentMacAddresses(json.dumps(stored))
+
+    assert macs is not None and macs
+    spanned = max(macs.values()) - min(macs.values())
+    assert spanned <= main._MAC_CANDIDATE_MAX_INDICES
+
+
+# --------------------------------------------------------------------------
+# recordAccessorySeen
+#
+# What keeps a wide currentMacAddresses margin from being paid for on every scan: a match
+# against a *primary* key realigns the stored index, in either direction. A secondary key's
+# index is only a lower bound and must not be trusted the same way.
+# --------------------------------------------------------------------------
+
+_ALIGNMENT_DATE = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def _paired_accessory(alignment_index: int) -> dict:
+    """A `FindMyAccessory` mapping with fixed, deterministic key material.
+
+    Real master/session keys, so the derived MACs below are the actual ones a scan would see -
+    not a fake fixture standing in for them. Alignment is planted away from index 0 so a
+    correction has somewhere to move both above and below.
+    """
+    from findmy import FindMyAccessory
+
+    accessory = FindMyAccessory(
+        master_key=b"\x11" * 28,
+        skn=b"\x22" * 32,
+        sks=b"\x33" * 32,
+        paired_at=_ALIGNMENT_DATE,
+        name="Test tag",
+        alignment_date=_ALIGNMENT_DATE,
+        alignment_index=alignment_index,
+    )
+    return accessory.to_json()
+
+
+def _mac_at(accessoryJson: dict, index: int, key_type) -> str:
+    from findmy import FindMyAccessory
+
+    accessory = FindMyAccessory.from_json(accessoryJson)
+    for key in accessory.keys_at(index):
+        if key.key_type == key_type:
+            return key.mac_address
+    raise AssertionError(f"no {key_type} key at index {index}")
+
+
+def _ms(dt: datetime) -> int:
+    return int(dt.timestamp() * 1000)
+
+
+def test_recordAccessorySeen_realigns_downward_from_a_primary_match():
+    """The case the whole feature exists for: alignment drifted ahead of the truth."""
+    stored = _paired_accessory(alignment_index=2880)
+    true_index = 2850  # inside the 12h margin, below the stored (wrong) alignment
+    mac = _mac_at(stored, true_index, KeyPairType.PRIMARY)
+
+    corrected = main.recordAccessorySeen(json.dumps(stored), mac, _ms(_ALIGNMENT_DATE))
+
+    assert corrected is not None
+    parsed = json.loads(corrected)
+    assert parsed["alignment_index"] == true_index
+    assert parsed["alignment_date"] == _ALIGNMENT_DATE.isoformat()
+
+
+def test_recordAccessorySeen_realigns_upward_from_a_primary_match():
+    stored = _paired_accessory(alignment_index=2880)
+    true_index = 2910  # inside the 12h margin, above the stored alignment
+    mac = _mac_at(stored, true_index, KeyPairType.PRIMARY)
+
+    corrected = main.recordAccessorySeen(json.dumps(stored), mac, _ms(_ALIGNMENT_DATE))
+
+    assert corrected is not None
+    assert json.loads(corrected)["alignment_index"] == true_index
+
+
+def test_recordAccessorySeen_is_a_noop_when_already_aligned():
+    """The common case, once alignment has healed: no write on every sighting thereafter."""
+    stored = _paired_accessory(alignment_index=2880)
+    mac = _mac_at(stored, 2880, KeyPairType.PRIMARY)
+
+    assert main.recordAccessorySeen(json.dumps(stored), mac, _ms(_ALIGNMENT_DATE)) is None
+
+
+def test_recordAccessorySeen_with_a_hint_agrees_with_the_wide_search():
+    """The hint is an optimisation, not a second rule - both paths must answer the same.
+
+    Checking one index is three key derivations; the 48-hour window is about 1150, measured at
+    1.15s on desktop and several times that under Chaquopy. Called on the sighting cadence
+    without the hint, the app sat at 135% CPU with two tags in range until Android killed it.
+    """
+    stored = _paired_accessory(alignment_index=2880)
+    true_index = 2850
+    mac = _mac_at(stored, true_index, KeyPairType.PRIMARY)
+    at = _ms(_ALIGNMENT_DATE)
+
+    without_hint = main.recordAccessorySeen(json.dumps(stored), mac, at)
+    with_hint = main.recordAccessorySeen(json.dumps(stored), mac, at, true_index)
+
+    assert with_hint == without_hint
+    assert json.loads(with_hint)["alignment_index"] == true_index
+
+
+def test_recordAccessorySeen_falls_back_when_the_hint_is_wrong():
+    """A hint that misses must cost the wide search, not the sighting.
+
+    The candidate set may have rolled between the scan that matched and this call, so the index
+    it named can be one the address no longer belongs to. Trusting the hint to be exhaustive
+    would silently drop a correction that was there to be made.
+    """
+    stored = _paired_accessory(alignment_index=2880)
+    true_index = 2850
+    mac = _mac_at(stored, true_index, KeyPairType.PRIMARY)
+
+    corrected = main.recordAccessorySeen(
+        json.dumps(stored), mac, _ms(_ALIGNMENT_DATE), true_index + 7)
+
+    assert corrected is not None
+    assert json.loads(corrected)["alignment_index"] == true_index
+
+
+def test_recordAccessorySeen_ignores_a_secondary_match_below_the_stored_alignment():
+    """A secondary key is shared by 96 primary indices, so its reported index is a floor rather
+    than a fix. A floor below where alignment already stands proves nothing and moves nothing."""
+    stored = _paired_accessory(alignment_index=2880)
+    mac = _mac_at(stored, 2850, KeyPairType.SECONDARY)
+
+    assert main.recordAccessorySeen(json.dumps(stored), mac, _ms(_ALIGNMENT_DATE)) is None
+
+
+def _a_secondary_reported_above(accessoryJson: dict, floor: int):
+    """A secondary key the app itself would report above `floor`, and the index it reports.
+
+    Picked through `current_keys` rather than by index arithmetic, because `keys_at` yields
+    more than one secondary key for a given index and taking whichever comes first says
+    nothing about where the app would place it. The window's own answer is the input the
+    function under test actually receives.
+    """
+    accessory = main.accessoryFromJson(json.dumps(accessoryJson))
+    reported = accessory.current_keys(_ALIGNMENT_DATE, margin=main._MAC_CANDIDATE_MARGIN)
+
+    for key, index in sorted(reported.items(), key=lambda pair: pair[1]):
+        if key.key_type == KeyPairType.SECONDARY and index > floor:
+            return key.mac_address, index
+
+    raise AssertionError(f"no secondary key is reported above index {floor}")
+
+
+def test_recordAccessorySeen_raises_the_floor_from_a_secondary_match_above_alignment():
+    """The case a long-separated tag actually presents, measured on hardware.
+
+    A tag that has been away from its owner holds a day key, so it matches on a secondary and
+    never on a primary - and with primary-only correction its alignment could never recover, no
+    matter how often somebody walked past it. Measured on a real accessory: heard at -24 dBm
+    lying beside the phone, its address sat 58 indices (14.5 hours) above where alignment
+    believed "now" was, and it was therefore absent from its own candidate set.
+
+    Raising alignment to the secondary's own index cannot overshoot: the true index lies inside
+    that key's ~96-index span, and the span starts at the index reported here.
+    """
+    stored = _paired_accessory(alignment_index=2880)
+    mac, reported_at = _a_secondary_reported_above(stored, 2880)
+
+    corrected = main.recordAccessorySeen(json.dumps(stored), mac, _ms(_ALIGNMENT_DATE))
+
+    assert corrected is not None
+    parsed = json.loads(corrected)
+    assert parsed["alignment_index"] == reported_at
+    assert parsed["alignment_index"] > 2880
+
+
+def test_recordAccessorySeen_never_moves_the_floor_past_the_key_that_justified_it():
+    """The floor may only ever undershoot the truth, which is what makes it safe to apply.
+
+    Overshooting is the failure that produced the 114-index drift this whole path exists to
+    undo, and it comes from taking the *highest* index a key could belong to. This takes the
+    lowest, so the stored index must never exceed the index whose key was actually heard.
+    """
+    stored = _paired_accessory(alignment_index=2880)
+    mac, reported_at = _a_secondary_reported_above(stored, 2880)
+
+    corrected = main.recordAccessorySeen(json.dumps(stored), mac, _ms(_ALIGNMENT_DATE))
+
+    # The span this key covers starts where it was reported, so the true index is at or above
+    # that. Storing anything higher would be inventing certainty the key does not carry.
+    assert json.loads(corrected)["alignment_index"] <= reported_at
+
+
+def test_recordAccessorySeen_refuses_a_sighting_dated_before_the_stored_alignment():
+    """The backward-time guard update_alignment has, kept when bypassing it: a rolled-back
+    device clock must not persist a (past date, current index) pair - the index extrapolated
+    from that past date would overshoot once the clock corrects."""
+    stored = _paired_accessory(alignment_index=2880)
+    true_index = 2850
+    mac = _mac_at(stored, true_index, KeyPairType.PRIMARY)
+
+    an_hour_before_alignment = _ALIGNMENT_DATE - timedelta(hours=1)
+    assert main.recordAccessorySeen(
+        json.dumps(stored), mac, _ms(an_hour_before_alignment)) is None
+
+
+def test_recordAccessorySeen_returns_none_for_an_unmatched_address():
+    stored = _paired_accessory(alignment_index=2880)
+
+    assert main.recordAccessorySeen(
+        json.dumps(stored), "00:00:00:00:00:00", _ms(_ALIGNMENT_DATE)) is None
+
+
+def test_recordAccessorySeen_ignores_a_self_generated_tag():
+    """A fixed key set never rotates - update_alignment is a no-op for it too - so there is no
+    drift here for this to fix."""
+    macs = main.currentMacAddresses(json.dumps(_CUSTOM_ACCESSORY))
+
+    assert main.recordAccessorySeen(
+        json.dumps(_CUSTOM_ACCESSORY), next(iter(macs)), _ms(_ALIGNMENT_DATE)) is None
+
+
+def test_recordAccessorySeen_returns_none_on_garbage():
+    assert main.recordAccessorySeen("not an accessory at all", "00:00:00:00:00:00", 0) is None
+
+
+def test_convertPlistToJson_returns_none_on_garbage():
+    """Failure must be None, not an exception - the caller retries later."""
+    assert main.convertPlistToJson("not a plist at all") is None
+
+
+def test_convertPlistToJson_returns_none_on_empty():
+    assert main.convertPlistToJson("") is None
+
+
+# --------------------------------------------------------------------------
+# _filterReportsByTimeRange
+#
+# 0.9.x removed the server-side time window, so this filtering is now the only
+# thing enforcing the range the Java side asked for.
+# --------------------------------------------------------------------------
+
+def test_filter_includes_reports_inside_the_window():
+    now = datetime.now(tz=timezone.utc)
+    inside = FakeReport(now - timedelta(hours=1))
+    out = main._filterReportsByTimeRange([inside], _ms(now - timedelta(hours=24)), _ms(now))
+    assert out == [inside]
+
+
+def test_filter_excludes_reports_before_the_window():
+    now = datetime.now(tz=timezone.utc)
+    old = FakeReport(now - timedelta(days=30))
+    out = main._filterReportsByTimeRange([old], _ms(now - timedelta(hours=24)), _ms(now))
+    assert out == []
+
+
+def test_filter_excludes_reports_after_the_window():
+    now = datetime.now(tz=timezone.utc)
+    future = FakeReport(now + timedelta(hours=2))
+    out = main._filterReportsByTimeRange([future], _ms(now - timedelta(hours=24)), _ms(now))
+    assert out == []
+
+
+def test_filter_boundaries_are_inclusive():
+    """A report exactly on either edge must be kept, not silently dropped."""
+    now = datetime.now(tz=timezone.utc).replace(microsecond=0)
+    start = now - timedelta(hours=24)
+
+    at_start = FakeReport(start)
+    at_end = FakeReport(now)
+
+    out = main._filterReportsByTimeRange([at_start, at_end], _ms(start), _ms(now))
+    assert out == [at_start, at_end]
+
+
+def test_filter_skips_reports_without_a_timestamp():
+    now = datetime.now(tz=timezone.utc)
+    out = main._filterReportsByTimeRange([FakeReport(None)], _ms(now - timedelta(hours=1)), _ms(now))
+    assert out == []
+
+
+def test_filter_with_no_bounds_keeps_everything():
+    now = datetime.now(tz=timezone.utc)
+    reports = [FakeReport(now - timedelta(days=d)) for d in range(5)]
+    assert main._filterReportsByTimeRange(reports, None, None) == reports
+
+
+# --------------------------------------------------------------------------
+# _serializeReports
+# --------------------------------------------------------------------------
+
+def test_serializeReports_shape_matches_java_expectations():
+    now = datetime.now(tz=timezone.utc)
+    items = main._serializeReports([FakeReport(now)])
+
+    assert len(items) == 1
+    item = items[0]
+    # PythonAppleService.mapResults reads exactly these keys.
+    for key in ("publishedAt", "description", "timestamp", "confidence",
+                "latitude", "longitude", "horizontalAccuracy", "status"):
+        assert key in item, f"missing {key} - would break mapResults on the Java side"
+
+    # published_at no longer exists in 0.9.x, so it mirrors timestamp.
+    assert item["publishedAt"] == item["timestamp"]
+    assert item["description"] == ""
+
+
+def test_serializeReports_sorts_chronologically():
+    now = datetime.now(tz=timezone.utc)
+    unsorted_reports = [
+        FakeReport(now),
+        FakeReport(now - timedelta(hours=5)),
+        FakeReport(now - timedelta(hours=2)),
+    ]
+    items = main._serializeReports(unsorted_reports)
+    timestamps = [i["timestamp"] for i in items]
+    assert timestamps == sorted(timestamps)
+
+
+# --------------------------------------------------------------------------
+# _narrowAlignmentIfNeeded
+#
+# Guards the issue #30 concern: an unaligned accessory searches its whole
+# lifetime of key indices, which at ~290 keys per request is hundreds of calls
+# to Apple on the first fetch after upgrading.
+# --------------------------------------------------------------------------
+
+class FakeAccessory:
+    """Reports a key-index width, and can narrow once a fetch has "found" something."""
+
+    def __init__(self, width):
+        self._width = width
+        self.narrowed = False
+
+    def get_min_index(self, _dt):
+        return 0
+
+    def get_max_index(self, _dt):
+        return 0 if self.narrowed else self._width
+
+
+class FakeAccount:
+    def __init__(self, latest=None, history=None, on_fetch=None):
+        self.fetch_location_calls = 0
+        self.fetch_history_calls = 0
+        self._latest = latest
+        self._history = history if history is not None else []
+        self._on_fetch = on_fetch
+
+    def fetch_location(self, accessory):
+        self.fetch_location_calls += 1
+        if self._on_fetch:
+            self._on_fetch(accessory)
+        return self._latest
+
+    def fetch_location_history(self, accessory):
+        self.fetch_history_calls += 1
+        return self._history
+
+
+def test_wide_window_fetches_latest_instead_of_history():
+    """
+    An unaligned tag must not trigger a full-history key search. Asking for the latest
+    location narrows the window as a side effect and still returns something useful.
+    """
+    now = datetime.now(tz=timezone.utc)
+    report = FakeReport(now)
+    accessory = FakeAccessory(width=50_000)
+    account = FakeAccount(latest=report, on_fetch=lambda acc: setattr(acc, "narrowed", True))
+
+    out = main._fetchReportsForAccessory(account, accessory, now - timedelta(hours=24), now)
+
+    assert account.fetch_location_calls == 1
+    assert account.fetch_history_calls == 0, "must not also search the whole history"
+    assert out.reports == [report]
+    assert not out.bounded_to_window, "the probe ignores the window, and says so"
+
+
+def test_narrow_window_uses_the_normal_history_fetch():
+    """Once aligned, fetches go back to normal - no extra round trip per call."""
+    now = datetime.now(tz=timezone.utc)
+    history = [FakeReport(now), FakeReport(now - timedelta(hours=2))]
+    accessory = FakeAccessory(width=96)  # about a day for an AirTag
+    account = FakeAccount(history=history)
+
+    out = main._fetchReportsForAccessory(account, accessory, now - timedelta(hours=24), now)
+
+    assert account.fetch_history_calls == 1
+    assert account.fetch_location_calls == 0
+    assert out.reports == history
+    assert out.bounded_to_window, "a history fetch honours the requested window"
+
+
+def test_wide_window_with_no_reports_does_not_then_search_the_history():
+    """
+    The regression this design exists to avoid: a tag with no recent reports used to
+    traverse the entire range for the probe, narrow nothing, then traverse it again for
+    the history fetch - double the work in the worst case.
+    """
+    now = datetime.now(tz=timezone.utc)
+    accessory = FakeAccessory(width=50_000)          # never narrows
+    account = FakeAccount(latest=None)
+
+    out = main._fetchReportsForAccessory(account, accessory, now - timedelta(hours=24), now)
+
+    assert account.fetch_location_calls == 1
+    assert account.fetch_history_calls == 0, "must not traverse the same empty range twice"
+    assert out.reports == []
+
+
+class _FakeAirtag:
+    """Only what getLastReports touches after the fetch."""
+
+    def to_json(self):
+        return {"aligned": True}
+
+
+class _FakeRequest:
+    def __init__(self, beacon_id):
+        self._id = beacon_id
+
+    def getBeaconId(self):
+        return self._id
+
+    def getAccessoryJson(self):
+        return "{}"
+
+
+class _FakeRequestList:
+    """Stands in for the Java List<AccessoryRequest> the bridge is handed."""
+
+    def __init__(self, requests):
+        self._requests = requests
+
+    def size(self):
+        return len(self._requests)
+
+    def get(self, i):
+        return self._requests[i]
+
+
+def _runGetLastReports(monkeypatch, fetch_result, hours_back=24):
+    # The dispatch, not the library class. These tests are about what getLastReports does with
+    # an accessory, not about reading one - and patching FindMy.py's own from_json used to let
+    # them feed it a blob with no "type", which the real thing has always rejected.
+    monkeypatch.setattr(main, "accessoryFromJson", lambda _json: _FakeAirtag())
+    monkeypatch.setattr(
+        main, "_fetchReportsForAccessory", lambda *args, **kwargs: fetch_result)
+
+    return main.getLastReports(
+        account=object(),
+        idToAccessoryData=_FakeRequestList([_FakeRequest("beacon-1")]),
+        hoursBack=hours_back)
+
+
+def test_a_newly_imported_tag_keeps_a_location_older_than_the_window(monkeypatch):
+    """
+    The bug this fixes. A tag with no alignment record never honours the requested window -
+    the probe walks backwards until it finds anything at all - so filtering its result to the
+    last 24 hours threw away the only location the app had just successfully found.
+
+    A tag that had sat in a drawer for two days came back from an import reading "no last
+    location known", despite the fetch having located it.
+    """
+    now = datetime.now(tz=timezone.utc)
+    two_days_old = FakeReport(now - timedelta(days=2))
+
+    out = _runGetLastReports(
+        monkeypatch, main.AccessoryFetch([two_days_old], bounded_to_window=False))
+
+    assert len(out["beacon-1"]["reports"]) == 1, \
+        "the latest known location must survive, however old it is"
+
+
+def test_an_aligned_tag_keeps_the_older_sightings_it_paid_to_fetch(monkeypatch):
+    """
+    **Reports from outside the window are kept, not dropped.**
+
+    This used to assert the opposite, on the reasoning that the window is what makes "the last
+    24 hours" true. That reasoning does not survive what the window actually is: a *key* range,
+    not a time range. Keys roll every fifteen minutes, so asking for the last hour asks Apple
+    about a few key indices, and Apple answers with every report it holds for them - which
+    routinely includes sightings from before the window opened.
+
+    Those reports have already been searched for, downloaded and decrypted by the time the
+    filter ran. Dropping them threw that work away and left a hole in stored history that the
+    history screen would later pay to fetch all over again. See `getLastReports`.
+
+    `getReportsForDateRange` does the same, for the same reason. Narrowing to the day somebody
+    is looking at is a display concern and happens in `HistoryViewActivity`, which filters the
+    remote answer before drawing it and reads the local half through a day-bounded query.
+    """
+    now = datetime.now(tz=timezone.utc)
+    recent = FakeReport(now - timedelta(hours=1))
+    older = FakeReport(now - timedelta(days=2))
+
+    out = _runGetLastReports(
+        monkeypatch, main.AccessoryFetch([recent, older], bounded_to_window=True))
+
+    assert len(out["beacon-1"]["reports"]) == 2, (
+        "an older sighting for the same keys costs nothing extra and fills in history"
+    )
+
+
+def test_keeping_older_sightings_does_not_change_the_latest_position(monkeypatch):
+    """
+    The property that made widening safe, pinned separately so it stays true.
+
+    The map draws the newest report, so adding older ones to the answer must not move the pin.
+    If this ever fails, widening has become visible to the user rather than being purely
+    additive to stored history.
+    """
+    now = datetime.now(tz=timezone.utc)
+    newest = FakeReport(now - timedelta(hours=1))
+    older = FakeReport(now - timedelta(days=2))
+
+    out = _runGetLastReports(
+        monkeypatch, main.AccessoryFetch([older, newest], bounded_to_window=True))
+
+    timestamps = [report["timestamp"] for report in out["beacon-1"]["reports"]]
+
+    assert max(timestamps) == _ms(now - timedelta(hours=1)), (
+        "the newest report - the one the map draws - must be unaffected"
+    )
+
+
+def test_unknown_width_falls_back_to_the_history_fetch():
+    """If the width cannot be determined, behave exactly as before this optimisation."""
+    class BrokenAccessory:
+        def get_min_index(self, _dt):
+            raise ValueError("nope")
+
+        def get_max_index(self, _dt):
+            raise ValueError("nope")
+
+    now = datetime.now(tz=timezone.utc)
+    history = [FakeReport(now)]
+    account = FakeAccount(history=history)
+
+    out = main._fetchReportsForAccessory(account, BrokenAccessory(), now - timedelta(hours=24), now)
+
+    assert account.fetch_history_calls == 1
+    assert out.reports == history
+
+
+# --------------------------------------------------------------------------
+# Key alignment records
+#
+# The whole point: without one, an accessory starts at index 0 from its pairing
+# date and the first fetch searches the tag's entire history. With one, it starts
+# where macOS last observed the key index.
+# --------------------------------------------------------------------------
+
+def _alignment_plist_bytes(days_ago: int, index: int) -> bytes:
+    """A KeyAlignmentRecord in the shape macOS writes it."""
+    import plistlib
+    observed = (datetime.now(tz=timezone.utc) - timedelta(days=days_ago)).replace(
+        tzinfo=None, microsecond=0)
+    return plistlib.dumps({
+        "lastIndexObservationDate": observed,
+        "lastIndexObserved": index,
+    })
+
+
+@pytest.mark.skipif(not BEACON_PLISTS, reason="no redacted beacon fixture available")
+def test_alignment_record_collapses_the_first_fetch_key_search():
+    """An old tag with an alignment record must not search its whole history."""
+    from findmy import FindMyAccessory
+
+    plist_path = BEACON_PLISTS[0]
+    now = datetime.now(tz=timezone.utc)
+    start = now - timedelta(hours=24)
+
+    without = FindMyAccessory.from_plist(plist_path)
+    unaligned_keys = without.get_max_index(now) - without.get_min_index(start) + 1
+
+    # Same accessory, but macOS observed its index yesterday.
+    import io as _io
+    with_alignment = FindMyAccessory.from_plist(
+        plist_path, _io.BytesIO(_alignment_plist_bytes(days_ago=1, index=50_000)))
+    aligned_keys = with_alignment.get_max_index(now) - with_alignment.get_min_index(start) + 1
+
+    assert aligned_keys < unaligned_keys, (
+        f"alignment record did not narrow the search "
+        f"({aligned_keys} vs {unaligned_keys} keys)"
+    )
+    # Apple accepts ~290 keys per request; a day's drift either side should stay small.
+    assert aligned_keys < 1000, f"expected a bounded search, got {aligned_keys} keys"
+
+
+@pytest.mark.skipif(not BEACON_PLISTS, reason="no redacted beacon fixture available")
+def test_convertPlistToJson_accepts_an_alignment_record():
+    plist_xml = _read_plist_xml(BEACON_PLISTS[0])
+    alignment_xml = _alignment_plist_bytes(days_ago=1, index=50_000).decode("utf-8")
+
+    result = main.convertPlistToJson(plist_xml, alignment_xml)
+
+    assert result is not None
+    parsed = json.loads(result)
+    assert parsed.get("type") == "accessory"
+
+
+@pytest.mark.skipif(not BEACON_PLISTS, reason="no redacted beacon fixture available")
+def test_convertPlistToJson_still_works_without_an_alignment_record():
+    """Exports predating format 0.0.2 have none, and must keep importing."""
+    plist_xml = _read_plist_xml(BEACON_PLISTS[0])
+    assert main.convertPlistToJson(plist_xml) is not None
+    assert main.convertPlistToJson(plist_xml, None) is not None
+
+
+@pytest.mark.skipif(not BEACON_PLISTS, reason="no redacted beacon fixture available")
+def test_convertPlistToJson_survives_a_corrupt_alignment_record():
+    """A bad alignment record must not cost us the beacon entirely."""
+    plist_xml = _read_plist_xml(BEACON_PLISTS[0])
+    result = main.convertPlistToJson(plist_xml, "this is not a plist")
+    # from_plist raises on a malformed alignment plist, so we return None and the caller
+    # retries later rather than storing something wrong.
+    assert result is None
+
+
+# --------------------------------------------------------------------------
+# assertAnisetteIsSupported
+#
+# Remote is the only provider that works on Android; local needs the unicorn CPU
+# emulator, which Chaquopy cannot build. Catching it here means a clear message
+# rather than a NotImplementedError from inside the stub package.
+# --------------------------------------------------------------------------
+
+def _account_blob(anisette):
+    return json.dumps({"type": "account", "anisette": anisette})
+
+
+def test_remote_anisette_is_supported():
+    blob = _account_blob({"type": "aniRemote", "url": "https://ani.example.com"})
+    assert main.assertAnisetteIsSupported(blob) is None
+
+
+def test_local_anisette_is_rejected_with_a_readable_reason():
+    reason = main.assertAnisetteIsSupported(_account_blob({"type": "aniLocal"}))
+    assert reason is not None
+    assert "aniLocal" in reason
+    assert "remote" in reason.lower()
+
+
+def test_missing_anisette_config_is_rejected():
+    assert main.assertAnisetteIsSupported(json.dumps({"type": "account"})) is not None
+
+
+def test_unreadable_account_blob_is_rejected():
+    assert main.assertAnisetteIsSupported("not json") is not None
+
+
+def test_getAccount_refuses_local_anisette():
+    """The guard must actually be wired into the restore path."""
+    assert main.getAccount(_account_blob({"type": "aniLocal"})) is None
+
+
+# --------------------------------------------------------------------------
+# A session Apple has stopped accepting
+#
+# It deserializes perfectly and is completely unusable: every fetch fails its state
+# check before a request is made. Returning it as a success is how the app came up
+# showing stale pins and spinners that stopped, with the reason only in the log.
+# Issue #43.
+# --------------------------------------------------------------------------
+
+def _storedAccount(loggedIn: bool) -> str:
+    from findmy.reports import AppleAccount, RemoteAnisetteProvider
+    from findmy.reports.state import LoginState
+
+    account = AppleAccount(RemoteAnisetteProvider("https://ani.example.com"))
+    stored = account.to_json()
+
+    # A fresh account is LOGGED_OUT, which is exactly the shape an invalidated session
+    # restores to. The logged-in case is the same blob with the one field moved, so the
+    # two tests differ in nothing else.
+    stored["login"]["state"] = (
+        LoginState.LOGGED_IN.value if loggedIn else LoginState.LOGGED_OUT.value
+    )
+    return json.dumps(stored)
+
+
+def _storedAccountInState(state) -> str:
+    from findmy.reports import AppleAccount, RemoteAnisetteProvider
+
+    account = AppleAccount(RemoteAnisetteProvider("https://ani.example.com"))
+    stored = account.to_json()
+    stored["login"]["state"] = state.value
+    return json.dumps(stored)
+
+
+def test_a_session_apple_no_longer_accepts_is_a_failed_restore():
+    assert main.getAccount(_storedAccount(loggedIn=False)) is None
+
+
+def test_a_restored_session_that_only_wants_a_code_is_kept():
+    """
+    **The issue #43 fix used to throw this away, and that was too much.**
+
+    Its reasoning was that the app only stores an account after a completed sign-in, so a
+    non-LOGGED_IN restore can only mean the session went bad later. True, and beside the point:
+    that is an argument about how the state arose, not about whether it can be fixed. REQUIRE_2FA
+    is precisely the state six digits resolve, and resolving it needs this account object rather
+    than the user's password.
+
+    So it comes back, and the caller asks what it needs. Discarding it cost somebody a full
+    sign-in for a session that was one code away from working.
+    """
+    from findmy.reports.state import LoginState
+
+    restored = main.getAccount(_storedAccountInState(LoginState.REQUIRE_2FA))
+
+    assert restored is not None, (
+        "a session needing a second factor must be handed back, not discarded"
+    )
+    assert main.getSecondFactorMethodsIfNeeded(restored) is not None, (
+        "and it must report that a second factor is what it needs"
+    )
+
+
+def test_a_logged_out_session_is_still_a_failed_restore():
+    """
+    The other half of #43, unchanged. No code fixes being logged out, so this one really is a
+    failed restore and the user has to sign in properly.
+    """
+    from findmy.reports.state import LoginState
+
+    assert main.getAccount(_storedAccountInState(LoginState.LOGGED_OUT)) is None
+
+
+def test_a_session_that_still_works_restores_normally():
+    """
+    The other half, and the one that matters more.
+
+    Reporting a working session as failed would sign people out for no reason - a far worse
+    bug than the one above, and the obvious way to get this wrong.
+    """
+    assert main.getAccount(_storedAccount(loggedIn=True)) is not None
+
+
+# --------------------------------------------------------------------------
+# Guard against the test environment drifting from what the app ships
+# --------------------------------------------------------------------------
+
+# The four files spell the same pin four ways - `...FindMy.py@<sha>`, `?rev=<sha>#<sha>`, and
+# TOML's `{ git = "...FindMy.py", rev = "<sha>" }` - so this matches a full sha anywhere on a
+# line that names the repository, rather than one exact syntax. Deliberately not "any 40-hex
+# string in the file": uv.lock is full of other packages' revisions.
+_FINDMY_SHA = re.compile(r"FindMy\.py[^\n]{0,80}?([0-9a-f]{40})")
+
+
+def test_the_whole_repository_pins_one_findmy():
+    """
+    One repository, one FindMy.py - in the app build, the bridge tests, and the exporter.
+
+    **Because `opentagviewer_export` is shared code that runs under both.** Chaquopy packages it
+    into the APK, where it executes against the pin in `app/build.gradle.kts`, and the desktop
+    exporter runs the same files from source against `python/uv.lock`. Two commits of one library
+    behind one package is a bug waiting for the first API difference, and it would break exactly
+    one of the two consumers.
+
+    The exporter tracked the *branch*, so this drifted by construction: every `uv lock` picked up
+    whatever had been pushed since. A build was still reproducible - the lockfile records what it
+    resolved - but "which FindMy.py does this repository use" had two answers.
+
+    Three files, one sha. Moving it means moving all three.
+    """
+    root = Path(__file__).resolve().parents[3].parent
+
+    sources = {
+        "app/build.gradle.kts": root / "app" / "build.gradle.kts",
+        "app/src/test/python/requirements.txt": Path(__file__).resolve().parent
+        / "requirements.txt",
+        "python/pyproject.toml": root / "python" / "pyproject.toml",
+        "python/uv.lock": root / "python" / "uv.lock",
+    }
+
+    found = {}
+    for name, path in sources.items():
+        assert path.is_file(), f"{name} is missing - this test no longer checks what it thinks"
+        shas = set(_FINDMY_SHA.findall(path.read_text(encoding="utf-8")))
+        assert shas, f"{name} does not pin FindMy.py to a commit"
+        assert len(shas) == 1, f"{name} names more than one FindMy.py commit: {sorted(shas)}"
+        found[name] = shas.pop()
+
+    assert len(set(found.values())) == 1, (
+        "the repository pins more than one FindMy.py:\n"
+        + "\n".join(f"  {name}: {sha}" for name, sha in sorted(found.items()))
+    )
+
+
+def test_pinned_versions_match_the_app_build():
+    """
+    These tests only mean anything if they run against the same library the APK ships.
+
+    **Every install, not just the `name==version` ones.** This used to match only that
+    shape, so the line installing FindMy from a git branch was invisible to it - and
+    requirements.txt said `FindMy==0.9.8` from PyPI while the app built the fork, for as
+    long as both were true. That is not a version skew, it is a different library: the
+    fork's Anisette providers take `serial=` and PyPI's do not, so a bridge test could
+    pass on code the app is unable to run.
+    """
+    import re
+
+    gradle = (Path(__file__).resolve().parents[3] / "build.gradle.kts").read_text(encoding="utf-8")
+    requirements = (Path(__file__).resolve().parent / "requirements.txt").read_text(encoding="utf-8")
+
+    # Comments first: the block above these installs explains what to put here using an
+    # `install("FindMy==<x>")` of its own, and a scan that cannot tell code from prose
+    # fails on the documentation telling you how to fix it.
+    #
+    # Whole comment lines only. Splitting each line on "//" also splits `https://`, which
+    # silently truncates the one install this test exists to check - the failure being
+    # that everything passes. That is the same blindness as the bug being fixed here, so
+    # it is worth the two extra characters of care.
+    code = "\n".join(
+        line for line in gradle.splitlines() if not line.lstrip().startswith("//")
+    )
+
+    # Every string literal handed to install(). The unicorn stub is passed as a file path
+    # rather than a literal, so it is not caught here and does not need to be.
+    installed = re.findall(r'install\("([^"]+)"\)', code)
+
+    assert installed, "could not find any pinned pip installs in build.gradle.kts"
+
+    required_lines = [
+        line.strip() for line in requirements.splitlines()
+        if line.strip() and not line.startswith("#")
+    ]
+
+    for spec in installed:
+        if spec.startswith("git+"):
+            # Compared whole, including the ref: a bare URL, or one at a branch, means the
+            # two sides can silently diverge again the moment somebody pushes to it.
+            assert "@" in spec.rsplit("/", 1)[-1], (
+                f"{spec} installs from git without pinning a commit - two builds of this"
+                " repo would ship different Python"
+            )
+            assert spec in required_lines, (
+                f"build.gradle.kts installs {spec}, which requirements.txt does not"
+            )
+        else:
+            package, _, version = spec.partition("==")
+            assert version, f"{spec} in build.gradle.kts is not pinned to a version"
+            assert f"{package}=={version}" in required_lines, (
+                f"{package} is {version} in build.gradle.kts but not in requirements.txt"
+            )
+
+
+# --------------------------------------------------------------------------
+# Describing a failed sign-in
+#
+# The screen showed "Login failed:" and nothing after the colon, because the failure
+# people actually hit is a connection timeout and `str(TimeoutError())` is "".
+# --------------------------------------------------------------------------
+
+class TestDescribingAFailedLogin:
+    def test_an_exception_with_no_message_still_says_something(self):
+        """The bug exactly: several asyncio errors carry no message at all."""
+        assert main.describeLoginFailure(TimeoutError()) == "TimeoutError"
+        assert main.describeLoginFailure(asyncio.CancelledError()) == "CancelledError"
+
+    def test_a_message_is_kept_and_named(self):
+        described = main.describeLoginFailure(ValueError("that password is wrong"))
+
+        assert "that password is wrong" in described
+        assert "ValueError" in described
+
+    @pytest.mark.parametrize("blank", ["", "   ", "\n"])
+    def test_a_whitespace_only_message_counts_as_none(self, blank):
+        assert main.describeLoginFailure(RuntimeError(blank)) == "RuntimeError"
+
+    def test_nothing_ever_describes_itself_as_empty(self):
+        for error in (TimeoutError(), asyncio.CancelledError(), OSError(), Exception()):
+            assert main.describeLoginFailure(error).strip()
+
+
+class TestClassifyingAFailedLogin:
+    @pytest.mark.parametrize("error", [
+        TimeoutError(),
+        asyncio.TimeoutError(),
+        asyncio.CancelledError(),
+        ConnectionRefusedError(),
+        OSError("network is unreachable"),
+    ])
+    def test_not_reaching_apple_is_a_network_failure(self, error):
+        assert main.classifyLoginFailure(error) == main.REASON_NETWORK
+
+    def test_anything_else_is_left_unclassified(self):
+        """
+        Deliberately not guessed at. Telling somebody to check their connection when their
+        password was wrong sends them to fix the wrong thing.
+        """
+        assert main.classifyLoginFailure(ValueError("bad password")) == main.REASON_UNKNOWN
+
+    def test_apple_declining_is_not_a_network_failure(self):
+        """
+        Issue #176. Apple answered, and refused.
+
+        Told to check their connection, somebody with a perfectly good connection resets a
+        router over a 503. The two failures look identical on screen and want opposite advice.
+        """
+        from findmy.errors import AppleServiceUnavailableError
+
+        declined = AppleServiceUnavailableError(503, "The Grand Slam request")
+
+        assert main.classifyLoginFailure(declined) == main.REASON_APPLE_DECLINED
+        assert main.classifyLoginFailure(declined) != main.REASON_NETWORK
+
+    def test_apple_declining_is_not_left_unclassified(self):
+        """
+        UNKNOWN shows the detail verbatim, which here is a sentence about Grand Slam and an HTTP
+        status. Accurate, and it reads as a bug in this app - which is what got reported.
+        """
+        from findmy.errors import AppleServiceUnavailableError
+
+        assert main.classifyLoginFailure(
+            AppleServiceUnavailableError(429, "The two-factor request"),
+        ) != main.REASON_UNKNOWN
+
+    def test_an_ordinary_protocol_error_is_still_unclassified(self):
+        """
+        The subclass is the signal, not the parent.
+
+        A response this library genuinely cannot read is still a bug worth reporting, and must
+        not be swept into "wait a few minutes".
+        """
+        from findmy.errors import UnhandledProtocolError
+
+        assert main.classifyLoginFailure(
+            UnhandledProtocolError("Error response for GSA request: 418"),
+        ) == main.REASON_UNKNOWN
+
+    def test_a_refusal_before_the_password_is_its_own_reason(self):
+        """
+        Issue #248. Grand Slam refused the `init` step, which sends no password, and the screen
+        showed "Email verification failed" verbatim - which reads as a typo and is not one.
+        """
+        from findmy.errors import GrandSlamRefusedError
+
+        refused = GrandSlamRefusedError("init", -1, "This action cannot be completed at this time.")
+
+        assert main.classifyLoginFailure(refused) == main.REASON_REFUSED_BEFORE_PASSWORD
+        assert "ec=-1" in main.describeLoginFailure(refused)
+
+    def test_a_wrong_password_is_not_a_refusal_before_it(self):
+        """
+        Same type, second step. A different Anisette server cannot fix a bad credential, so
+        this must not become the reason that offers one.
+        """
+        from findmy.errors import GrandSlamRefusedError
+
+        wrong = GrandSlamRefusedError("complete", -20101, "Your Apple ID or password was incorrect.")
+
+        assert main.classifyLoginFailure(wrong) == main.REASON_UNKNOWN
+
+    def test_a_library_error_is_recognised_by_its_module(self):
+        class ClientConnectorError(Exception):
+            pass
+
+        ClientConnectorError.__module__ = "aiohttp.client_exceptions"
+
+        assert main.classifyLoginFailure(ClientConnectorError()) == main.REASON_NETWORK
+
+
+# --------------------------------------------------------------------------
+# The two flags that pace the silent-tag backoff.
+#
+# Java reads `wideSearch` and `exhaustedWideSearch` off each per-beacon dict to
+# decide whether a tag is going quiet. A missing key reads as False, so leaving
+# them off a code path does not fail - it silently turns the backoff off, and
+# every empty answer counts as a healthy one. That is exactly what happened:
+# they were emitted from `getReports` only, and Java calls `getLastReports`.
+# --------------------------------------------------------------------------
+
+class _FakeAirtagOfWidth:
+    """An accessory whose key-index window is a chosen width."""
+
+    def __init__(self, width, narrows_to=None):
+        self._width = width
+        self._narrows_to = narrows_to
+        self._fetched = False
+
+    def get_min_index(self, _dt):
+        return 0
+
+    def get_max_index(self, _dt):
+        if self._fetched and self._narrows_to is not None:
+            return self._narrows_to
+        return self._width
+
+    def markFetched(self):
+        self._fetched = True
+
+    def to_json(self):
+        return {"aligned": True}
+
+
+def _runGetReports(monkeypatch, reports, start, end):
+    """The ranged variant, which the history screen calls one day at a time."""
+    monkeypatch.setattr(main, "accessoryFromJson", lambda _json: _FakeAirtag())
+    # The ranged variant has its own fetch helper, and it answers with a plain list rather
+    # than an AccessoryFetch - there is no window-versus-probe distinction to report here.
+    monkeypatch.setattr(main, "_fetchReportsInRange", lambda *args, **kwargs: reports)
+
+    return main.getReports(
+        account=object(),
+        idToAccessoryData=_FakeRequestList([_FakeRequest("beacon-1")]),
+        unixStartMs=_ms(start),
+        unixEndMs=_ms(end))
+
+
+def test_the_ranged_fetch_keeps_sightings_from_either_side_of_the_day(monkeypatch):
+    """
+    **Anything fetched is stored, whichever fetch found it.**
+
+    The history screen asks for one day, but the search underneath is over key indices, so
+    Apple hands back sightings either side of it. They cost the same to find and decrypt as the
+    in-range ones, and dropping them meant the next day the user stepped to paid to fetch them
+    again.
+
+    Narrowing to the day on screen happens in `HistoryViewActivity`, which filters this answer
+    before drawing it - so widening here fills the cache without changing what is shown.
+    """
+    day_start = datetime(2026, 3, 14, tzinfo=timezone.utc)
+    day_end = day_start + timedelta(days=1)
+
+    the_day_before = FakeReport(day_start - timedelta(hours=3))
+    during_the_day = FakeReport(day_start + timedelta(hours=9))
+    the_day_after = FakeReport(day_end + timedelta(hours=2))
+
+    out = _runGetReports(
+        monkeypatch, [the_day_before, during_the_day, the_day_after], day_start, day_end)
+
+    assert len(out["beacon-1"]["reports"]) == 3, (
+        "reports either side of the requested day are still worth storing"
+    )
+
+
+def _runGetLastReportsWith(monkeypatch, airtag, reports, hours_back=24):
+    monkeypatch.setattr(main, "accessoryFromJson", lambda _json: airtag)
+
+    def fetch(_account, accessory, _start, _end):
+        if hasattr(accessory, "markFetched"):
+            accessory.markFetched()
+        return main.AccessoryFetch(reports=reports, bounded_to_window=True)
+
+    monkeypatch.setattr(main, "_fetchReportsForAccessory", fetch)
+
+    return main.getLastReports(
+        account=object(),
+        idToAccessoryData=_FakeRequestList([_FakeRequest("beacon-1")]),
+        hoursBack=hours_back)["beacon-1"]
+
+
+def test_getlastreports_reports_whether_the_search_was_expensive(monkeypatch):
+    """
+    The regression. These keys were only ever written by `getReports`, which Java never calls,
+    so the live path reported nothing and every fruitless scan looked like a successful one.
+    """
+    held = _runGetLastReportsWith(
+        monkeypatch, _FakeAirtagOfWidth(50_000), reports=[])
+
+    assert "wideSearch" in held, "Java cannot pace the backoff without this key"
+    assert "exhaustedWideSearch" in held
+    assert held["wideSearch"] is True
+
+
+def test_an_aligned_tag_over_a_day_is_never_an_expensive_search(monkeypatch):
+    """
+    **The sharp edge, and the reason this is a test rather than a comment.**
+
+    `wideSearch` is derived from the width of the key-index range the fetch would search - not
+    from whether the accessory has an alignment record. For an *aligned* tag those are the same
+    question only because the app asks for a short window: keys rotate every 15 minutes, so 24
+    hours is ~96 indices against a threshold of 2000.
+
+    That leaves about twenty times' headroom, and it is entirely accidental. Raising
+    RefreshPolicy's cap past ~21 days would make every healthy tag's ordinary refresh look like
+    an expensive search, and they would all start accruing strikes and being asked less often -
+    the exact bug @parawanderer spotted in the database, reintroduced by a change nowhere near
+    this file.
+    """
+    indices_per_day = 4 * 24  # a key every 15 minutes
+
+    held = _runGetLastReportsWith(
+        monkeypatch, _FakeAirtagOfWidth(indices_per_day), reports=[])
+
+    assert held["wideSearch"] is False, (
+        "a day of an aligned tag's keys must not count as an expensive search; "
+        f"{indices_per_day} indices against a threshold of "
+        f"{main._ALIGNMENT_PROBE_THRESHOLD_INDICES}")
+
+    assert main._ALIGNMENT_PROBE_THRESHOLD_INDICES > indices_per_day * 7, (
+        "the threshold no longer covers even a week-long window, so ordinary refreshes of "
+        "healthy tags will be counted against them")
+
+
+def test_a_tag_that_answers_is_not_penalised_however_wide_the_search_was(monkeypatch):
+    """Finding something settles it. Java resets everything on a non-empty answer."""
+    found = FakeReport(datetime.now(timezone.utc))
+
+    held = _runGetLastReportsWith(
+        monkeypatch, _FakeAirtagOfWidth(50_000, narrows_to=10), reports=[found])
+
+    assert held["exhaustedWideSearch"] is False
+    assert held["reports"], "the report itself must still come back"
+
+
+def test_only_months_of_empty_history_counts_as_exhausted(monkeypatch):
+    """
+    Wide is not the same as dead.
+
+    A tag with no alignment record is wide on its first fetch and is perfectly healthy - it just
+    has not been located yet. Giving up needs the far larger _DEAD_TAG_WIDTH_INDICES and a
+    search that failed to narrow anything.
+    """
+    merely_wide = _runGetLastReportsWith(
+        monkeypatch, _FakeAirtagOfWidth(5_000), reports=[])
+
+    assert merely_wide["wideSearch"] is True
+    assert merely_wide["exhaustedWideSearch"] is False, (
+        "an unaligned tag must not be given up on for being unaligned")
+
+    truly_dead = _runGetLastReportsWith(
+        monkeypatch, _FakeAirtagOfWidth(50_000), reports=[])
+
+    assert truly_dead["exhaustedWideSearch"] is True
+
+
+def test_a_search_that_narrowed_is_not_exhausted_even_with_no_reports(monkeypatch):
+    """
+    Narrowing means something was found to align against, so the tag is broadcasting.
+
+    Without this the probe's own success would be read as failure whenever its report fell
+    outside the requested window.
+    """
+    held = _runGetLastReportsWith(
+        monkeypatch, _FakeAirtagOfWidth(50_000, narrows_to=10), reports=[])
+
+    assert held["exhaustedWideSearch"] is False
+
+
+# --------------------------------------------------------------------------
+# A session that goes stale mid-use, and wants a second factor rather than
+# being thrown away.
+# --------------------------------------------------------------------------
+
+class _FakeSecondFactorAccount:
+    """
+    Enough of an AppleAccount to answer the one question. The methods it hands back are
+    passed straight to `_convertToJavaDictWrapper`, so they have to be real FindMy.py
+    method objects or the conversion is not the thing being tested.
+    """
+
+    def __init__(self, state, methods=None, raises=False):
+        self.login_state = state
+        self._methods = methods or []
+        self._raises = raises
+        self.asked = 0
+
+    def get_2fa_methods(self):
+        self.asked += 1
+        if self._raises:
+            raise RuntimeError("Apple said no")
+        return self._methods
+
+
+def _aTrustedDeviceMethod():
+    """
+    A real `TrustedDeviceSecondFactorMethod`, because `_convertToJavaDictWrapper` dispatches on
+    `isinstance` - a duck-typed stand-in would fall through to the "unmapped" branch and the
+    test would pass while proving nothing.
+
+    The *sync* class, which is what a sync `AppleAccount` returns - it subclasses
+    `TrustedDeviceSecondFactorMethod`, so the isinstance check matches, and it is concrete. Its
+    `__init__` wants a live account, hence `__new__`.
+    """
+    from findmy.reports.twofactor import SyncTrustedDeviceSecondFactor
+
+    return SyncTrustedDeviceSecondFactor.__new__(SyncTrustedDeviceSecondFactor)
+
+
+def test_a_logged_in_account_is_not_asked_for_a_second_factor():
+    """
+    The overwhelmingly common case, and it must cost nothing: no methods fetched, no dialog.
+    """
+    from findmy.reports.state import LoginState
+
+    account = _FakeSecondFactorAccount(LoginState.LOGGED_IN)
+
+    assert main.getSecondFactorMethodsIfNeeded(account) is None
+    assert account.asked == 0, "a healthy account must not be interrogated about 2FA"
+
+
+def test_an_account_that_wants_2fa_offers_its_methods():
+    """
+    **The bug this exists for.** The account restored fine and later moved to REQUIRE_2FA, at
+    which point every fetch failed its state check forever with nothing on screen. The state is
+    recoverable, so the answer is the list of ways to recover it.
+    """
+    from findmy.reports.state import LoginState
+
+    account = _FakeSecondFactorAccount(
+        LoginState.REQUIRE_2FA, methods=[_aTrustedDeviceMethod()])
+
+    methods = main.getSecondFactorMethodsIfNeeded(account)
+
+    assert methods is not None, "REQUIRE_2FA is recoverable and must be offered, not swallowed"
+    assert len(methods) == 1
+    assert "obj" in methods[0], "Java needs the method object back to request and submit a code"
+
+
+def test_a_logged_out_account_is_not_offered_a_code_box():
+    """
+    No code fixes being logged out, and putting a box on screen that cannot work is worse than
+    saying nothing - it teaches people to type codes into whatever asks.
+    """
+    from findmy.reports.state import LoginState
+
+    account = _FakeSecondFactorAccount(LoginState.LOGGED_OUT)
+
+    assert main.getSecondFactorMethodsIfNeeded(account) is None
+    assert account.asked == 0
+
+
+def test_failing_to_ask_is_not_read_as_needing_a_code():
+    """
+    An unreadable state is not evidence that a second factor would help. Prompting on a guess is
+    the failure mode this direction is chosen to avoid.
+    """
+    from findmy.reports.state import LoginState
+
+    account = _FakeSecondFactorAccount(LoginState.REQUIRE_2FA, raises=True)
+
+    assert main.getSecondFactorMethodsIfNeeded(account) is None
+
+
+# --------------------------------------------------------------------------
+# closeAccount - issue #133: a discarded account leaks its session and sockets
+# --------------------------------------------------------------------------
+
+class _FakeLoop:
+    def __init__(self, closed=False, raises=False):
+        self._closed = closed
+        self._raises = raises
+        self.ran = []
+
+    def is_closed(self):
+        return self._closed
+
+    def run_until_complete(self, coro):
+        if self._raises:
+            coro.close()  # or Python warns about it, which is the thing being fixed
+            raise RuntimeError("Event loop is closed")
+        self.ran.append(coro)
+        # Actually drive it, so "never awaited" cannot happen unnoticed.
+        try:
+            coro.send(None)
+        except StopIteration:
+            pass
+        return None
+
+
+class _FakeClosableAccount:
+    """An account shaped like the sync AppleAccount: async close, private loop."""
+
+    def __init__(self, loop, loopAttr="_evt_loop"):
+        setattr(self, loopAttr, loop)
+        self.closed = 0
+
+    async def close(self):
+        self.closed += 1
+
+
+def test_closing_an_account_shuts_its_session_down():
+    """
+    **The whole point.** Nothing called this before, so every discarded account left an aiohttp
+    session, a connector and two sockets open until the collector noticed - and the collector
+    cannot close them either, because `Closable.__del__` swallows the RuntimeError it gets.
+    """
+    loop = _FakeLoop()
+    account = _FakeClosableAccount(loop)
+
+    assert main.closeAccount(account) is True
+    assert account.closed == 1, "close() has to actually be awaited, not merely called"
+
+
+def test_theloop_is_found_under_either_name():
+    """
+    `_evt_loop` on the sync account, `_loop` on Closable. Both private, and there is no public
+    route - so this is pinned rather than assumed.
+    """
+    loop = _FakeLoop()
+    account = _FakeClosableAccount(loop, loopAttr="_loop")
+
+    assert main.closeAccount(account) is True
+    assert account.closed == 1
+
+
+def test_anaccount_with_no_loop_is_not_closed_and_does_not_raise():
+    """
+    The caller is discarding it either way, so this reports rather than fails - but it returns
+    False, because a FindMy.py that renamed the loop would otherwise silently stop closing
+    anything and nobody would know.
+    """
+    class _NoLoop:
+        async def close(self):
+            raise AssertionError("should never be reached")
+
+    assert main.closeAccount(_NoLoop()) is False
+
+
+def test_aclosedLoopIsNotUsed():
+    loop = _FakeLoop(closed=True)
+    account = _FakeClosableAccount(loop)
+
+    assert main.closeAccount(account) is False
+    assert account.closed == 0
+
+
+def test_afailureToCloseIsReportedRatherThanRaised():
+    """
+    This runs on paths already recovering from something else - a failed restore, a sign-out -
+    where a new exception would replace the original problem with this one.
+    """
+    loop = _FakeLoop(raises=True)
+    account = _FakeClosableAccount(loop)
+
+    assert main.closeAccount(account) is False
+
+
+def test_closingNothingIsHarmless():
+    assert main.closeAccount(None) is False
+
+def test_candidate_window_agrees_with_what_current_mac_addresses_derives():
+    """The cheap answer and the expensive one must describe the same slice.
+
+    If they drift apart, a caller keeping what it derived would keep the wrong part of the
+    range and go on missing the tag while believing it had covered it.
+    """
+    accessory = json.dumps(_freshly_aligned_accessory())
+
+    window = main.candidateWindow(accessory)
+    macs = main.currentMacAddresses(accessory)
+
+    assert window is not None
+    assert set(macs.values()) <= set(range(window["lo"], window["hi"] + 1))
+
+
+def test_candidate_window_is_bounded_for_a_stale_alignment():
+    """A window too wide to derive whole is reported as the bounded slice, not the true width."""
+    accessory = json.dumps(_unaligned_accessory(
+        datetime.now(timezone.utc) - timedelta(days=400)))
+
+    window = main.candidateWindow(accessory)
+
+    assert window is not None
+    assert window["hi"] - window["lo"] <= main._MAC_CANDIDATE_MAX_INDICES
+
+
+def test_addresses_between_covers_exactly_the_requested_range():
+    accessory = json.dumps(_freshly_aligned_accessory())
+
+    derived = main.addressesBetween(accessory, 19100, 19150)
+
+    assert derived is not None
+    assert derived
+    # -1 for the secondary keys, whose index would be an artefact of where the range began.
+    assert set(derived.values()) <= set(range(19100, 19151)) | {main._INDEX_UNKNOWN}
+    assert any(index != main._INDEX_UNKNOWN for index in derived.values())
+
+
+def test_addresses_between_is_stable_across_calls():
+    """The mapping is a pure function of the keys and the index, which is what makes it
+    safe to store: a pair derived today has to still be true when it is read back."""
+    accessory = json.dumps(_freshly_aligned_accessory())
+
+    first = main.addressesBetween(accessory, 19100, 19120)
+    second = main.addressesBetween(accessory, 19100, 19120)
+
+    assert first == second
+
+
+def test_addresses_between_pieces_join_up_into_the_whole_set():
+    """Widening a search a piece at a time must reach the same addresses as asking once.
+
+    This is the property the stored copy rests on. Without it, extending the range would
+    leave gaps that nothing would ever go back for.
+    """
+    accessory = json.dumps(_freshly_aligned_accessory())
+
+    whole = main.addressesBetween(accessory, 19100, 19160)
+    lower = main.addressesBetween(accessory, 19100, 19130)
+    upper = main.addressesBetween(accessory, 19131, 19160)
+
+    joined = dict(lower)
+    joined.update(upper)
+
+    assert set(joined) == set(whole)
+
+
+def test_a_secondary_key_reports_no_index_rather_than_a_moving_one():
+    """The address set is pure; the index attached to it is not, for secondary keys.
+
+    A secondary key covers 96 primary indices and `keys_between` de-duplicates, so it would
+    otherwise be reported at the first index the call's own range reaches - 19100 when asked
+    for 19100..19160 and 19131 for the same address when asked for 19131..19160. That is where
+    the search started, not a fact about the tag, so it is reported as unknown instead. Pinned
+    down because a caller that stored such a pair would later read it as exact.
+    """
+    accessory = json.dumps(_freshly_aligned_accessory())
+
+    whole = main.addressesBetween(accessory, 19100, 19160)
+    upper = main.addressesBetween(accessory, 19131, 19160)
+
+    unknown = {mac for mac, index in whole.items() if index == main._INDEX_UNKNOWN}
+
+    assert unknown, "expected at least one secondary key in this range"
+
+    # Every index that is reported at all agrees between the two calls, which is what makes it
+    # safe to keep. The ones that would have disagreed are exactly the ones reported as unknown.
+    for mac in set(whole) & set(upper):
+        if whole[mac] != main._INDEX_UNKNOWN and upper[mac] != main._INDEX_UNKNOWN:
+            assert whole[mac] == upper[mac]
+
+
+def test_a_primary_key_index_survives_the_range_being_split():
+    """The property the stored hint rests on: a primary key sits at one index and stays there."""
+    accessory = json.dumps(_freshly_aligned_accessory())
+
+    whole = main.addressesBetween(accessory, 19100, 19160)
+    lower = main.addressesBetween(accessory, 19100, 19130)
+
+    known = {mac: index for mac, index in lower.items() if index != main._INDEX_UNKNOWN}
+
+    assert known
+    for mac, index in known.items():
+        assert whole[mac] == index
+
+
+def test_addresses_between_refuses_nothing_for_an_empty_range():
+    accessory = json.dumps(_freshly_aligned_accessory())
+
+    assert main.addressesBetween(accessory, 500, 499) == {}
+
+
+def test_addresses_between_returns_none_for_an_unreadable_accessory():
+    assert main.addressesBetween("not json at all", 0, 10) is None
+
+
+def test_candidate_window_returns_none_for_an_unreadable_accessory():
+    assert main.candidateWindow("not json at all") is None
+
+def _drift_line(capsys, before_index, before_date, after_index, after_date):
+    main._reportDrift(before_index, before_date, after_index, after_date)
+    printed = capsys.readouterr().out
+    return [line for line in printed.splitlines() if "Alignment drift" in line]
+
+
+def test_drift_is_not_reported_when_the_alignment_did_not_move(capsys):
+    """A fetch that found nothing to align to is not a drift of zero.
+
+    Reporting it as one would fill the series with readings that say the extrapolation was
+    confirmed, when in fact nothing checked it.
+    """
+    when = datetime.now(timezone.utc).isoformat()
+
+    assert _drift_line(capsys, 19200, when, 19200, when) == []
+
+
+def test_drift_is_the_gap_between_extrapolation_and_where_the_tag_was(capsys):
+    """Six hours on, a tag that rolled on schedule is at 24 indices; one at 20 has drifted 4."""
+    before = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    after = before + timedelta(hours=6)
+
+    lines = _drift_line(capsys, 19200, before.isoformat(), 19220, after.isoformat())
+
+    assert len(lines) == 1
+    assert "drift 4 index/indices" in lines[0]
+
+
+def test_a_tag_exactly_on_schedule_reports_no_drift(capsys):
+    before = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    after = before + timedelta(hours=6)
+
+    lines = _drift_line(capsys, 19200, before.isoformat(), 19224, after.isoformat())
+
+    assert len(lines) == 1
+    assert "drift 0 index/indices" in lines[0]
+
+
+def test_drift_is_signed_so_an_extrapolation_behind_the_tag_is_visible(capsys):
+    """Negative cannot happen if the extrapolation is a true upper bound, so it is worth
+    seeing rather than clamping away: one would mean that assumption is wrong."""
+    before = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    after = before + timedelta(hours=6)
+
+    lines = _drift_line(capsys, 19200, before.isoformat(), 19230, after.isoformat())
+
+    assert len(lines) == 1
+    assert "drift -6 index/indices" in lines[0]
+
+
+def test_drift_is_silent_for_an_accessory_with_no_alignment_at_all(capsys):
+    assert _drift_line(capsys, None, None, 19200, "2026-01-01T00:00:00+00:00") == []
+
+
+def test_drift_survives_an_unparseable_date(capsys):
+    assert _drift_line(capsys, 19200, "not a date", 19220, "also not a date") == []
+
+def _ble_drift_lines(capsys):
+    return [line for line in capsys.readouterr().out.splitlines()
+            if "Alignment drift (ble)" in line]
+
+
+def test_a_primary_match_over_ble_reports_drift(capsys):
+    """The reading an offline tag can produce, and the only one it ever will.
+
+    A tag the Find My network never sees has no fetch to be re-anchored by, so a primary-key
+    match over Bluetooth is the sole observation of where it really is.
+    """
+    stored = _paired_accessory(alignment_index=2880)
+    seen_at = _ALIGNMENT_DATE + timedelta(hours=6)
+
+    # Six hours on, a tag rolling on schedule would be at 2904. This one is at 2900.
+    mac = _mac_at(stored, 2900, KeyPairType.PRIMARY)
+    main.recordAccessorySeen(json.dumps(stored), mac, _ms(seen_at))
+
+    lines = _ble_drift_lines(capsys)
+
+    assert len(lines) == 1
+    assert "observed at index 2900" in lines[0]
+    assert "extrapolated 2904" in lines[0]
+    assert "drift 4 index/indices" in lines[0]
+
+
+def test_a_tag_still_at_the_stored_index_reports_its_drift(capsys):
+    """The reading that matters most, and the one an equality check would have swallowed.
+
+    Matching at the index alignment already holds is not a non-event: six hours have passed, so
+    the extrapolation has moved twenty-four indices on while the tag has not moved at all. That
+    is exactly the drift the whole question is about.
+    """
+    stored = _paired_accessory(alignment_index=2880)
+    seen_at = _ALIGNMENT_DATE + timedelta(hours=6)
+
+    mac = _mac_at(stored, 2880, KeyPairType.PRIMARY)
+    written = main.recordAccessorySeen(json.dumps(stored), mac, _ms(seen_at))
+
+    lines = _ble_drift_lines(capsys)
+
+    assert len(lines) == 1
+    assert "drift 24 index/indices" in lines[0]
+    assert written is None, "nothing to write, but the reading still had to happen"
+
+
+def test_a_tag_exactly_on_schedule_reports_no_drift_over_ble(capsys):
+    stored = _paired_accessory(alignment_index=2880)
+    seen_at = _ALIGNMENT_DATE + timedelta(hours=6)
+
+    mac = _mac_at(stored, 2904, KeyPairType.PRIMARY)
+    main.recordAccessorySeen(json.dumps(stored), mac, _ms(seen_at))
+
+    lines = _ble_drift_lines(capsys)
+
+    assert len(lines) == 1
+    assert "drift 0 index/indices" in lines[0]
+
+
+def test_a_secondary_match_reports_no_drift(capsys):
+    """A secondary key covers 192 indices, so its index is a lower bound rather than a position.
+
+    Reporting it as an observation would fill the series with readings that look like drift and
+    are really only the width of a day key.
+    """
+    stored = _paired_accessory(alignment_index=2880)
+    seen_at = _ALIGNMENT_DATE + timedelta(hours=6)
+
+    mac = _mac_at(stored, 2900, KeyPairType.SECONDARY)
+    main.recordAccessorySeen(json.dumps(stored), mac, _ms(seen_at))
+
+    assert _ble_drift_lines(capsys) == []
+

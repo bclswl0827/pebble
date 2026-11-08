@@ -1,0 +1,425 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools">
+    <data>
+    </data>
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <!-- match_parent so every card fills the uniform height MapsActivity forces on it;
+             with wrap_content the shorter cards would keep their own height and the white
+             panel would stop short of the card below it. -->
+        <LinearLayout
+            android:id="@+id/tag_item_container"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_marginLeft="4dp"
+            android:layout_marginRight="4dp"
+            android:background="@drawable/layout_rounded"
+            android:backgroundTint="?android:attr/colorBackground"
+            android:clipToPadding="false"
+            android:elevation="8dp"
+            android:orientation="vertical">
+
+            <LinearLayout
+                android:id="@+id/tag_item_top_text"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:minHeight="96dp"
+                android:orientation="horizontal"
+                android:paddingLeft="15dp"
+                android:paddingTop="10dp"
+                android:paddingRight="15dp"
+                android:paddingBottom="8dp">
+
+                <!-- layout_weight="1" here is load-bearing, not decoration. The sibling text
+                     column is match_parent, so this row always measures 102dp over budget; the
+                     1:1 weight split takes 51dp off each, leaving this column 51dp wide. Setting
+                     weight to 0 gives it the full 102dp and shoves the text column right by 51dp,
+                     narrowing it by the same amount. -->
+                <androidx.constraintlayout.widget.ConstraintLayout
+                    android:layout_width="102dp"
+                    android:layout_height="72dp"
+                    android:layout_gravity="center"
+                    android:layout_weight="1">
+
+                    <TextView
+                        android:id="@+id/device_icon_emoji"
+                        android:layout_width="90dp"
+                        android:layout_height="53dp"
+                        android:gravity="center"
+                        android:textSize="36sp"
+                        android:visibility="gone"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toTopOf="parent" />
+
+                    <ImageView
+                        android:id="@+id/device_icon_img"
+                        android:layout_width="90dp"
+                        android:layout_height="53dp"
+                        android:layout_weight="1"
+                        android:padding="5dp"
+                        android:src="@drawable/apple"
+                        android:tint="?attr/colorOutline"
+                        android:visibility="visible"
+                        app:layout_constraintBottom_toBottomOf="parent"
+                        app:layout_constraintEnd_toEndOf="parent"
+                        app:layout_constraintStart_toStartOf="parent"
+                        app:layout_constraintTop_toTopOf="parent" />
+                </androidx.constraintlayout.widget.ConstraintLayout>
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical"
+                    android:paddingLeft="15dp"
+                    android:paddingRight="15dp">
+
+                    <TextView
+                        android:id="@+id/device_name"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="@font/nunito_bold"
+                        android:maxLines="2"
+                        android:text="SomeTag 1"
+                        android:textColor="?attr/colorOnBackground"
+                        android:textSize="18sp" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:paddingTop="3dp"
+                        android:paddingBottom="3dp">
+
+                        <androidx.constraintlayout.widget.ConstraintLayout
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content">
+
+                            <ImageView
+                                android:id="@+id/imageView3"
+                                android:layout_width="19dp"
+                                android:layout_height="15dp"
+                                android:src="@drawable/marker_24_2"
+                                android:tint="?attr/colorOnSurfaceVariant" />
+
+                        </androidx.constraintlayout.widget.ConstraintLayout>
+
+                        <TextView
+                            android:id="@+id/device_location"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="5sp"
+                            android:fontFamily="@font/nunito_bold"
+                            android:gravity="center_vertical"
+                            android:maxLines="3"
+                            android:text="Streetstreet 1, 1234 CityThatIsLong Actually, Country"
+                            android:textColor="?attr/colorOnSurfaceVariant"
+                            android:textSize="12sp" />
+
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <!--
+                            A live pulse for the map card only: lit briefly whenever this tag's
+                            own advertisement is actually heard, and dimmed again once
+                            NearbyStatusPulse.PULSE_WINDOW_MS has passed without another one -
+                            see MapsActivity#showNearbyStatusOn. GONE whenever the line below is
+                            the ordinary "last updated" one instead, since there is nothing live
+                            to show a pulse for then.
+                        -->
+                        <ImageView
+                            android:id="@+id/device_nearby_pulse"
+                            android:layout_width="8dp"
+                            android:layout_height="8dp"
+                            android:layout_marginEnd="4dp"
+                            android:contentDescription="@null"
+                            android:src="@drawable/circle_filled"
+                            android:visibility="gone"
+                            tools:visibility="visible" />
+
+                        <TextView
+                            android:id="@+id/device_last_update"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:fontFamily="@font/nunito_semi_bold"
+                            android:text="@string/last_updated_x"
+                            android:textColor="?attr/colorOutline"
+                            android:textSize="12sp" />
+                    </LinearLayout>
+                </LinearLayout>
+
+            </LinearLayout>
+
+            <!--
+                **`top`, not `center`.** Each of these four buttons is an icon circle above a
+                label, and the labels are not all one line: "Location History" wraps in English,
+                and which of them wrap changes with the language. Centring made the row as tall as
+                its tallest button and then centred the shorter ones inside it, so their circles
+                sat half a line lower than the wrapping one.
+
+                Aligning to the top puts every circle at the same y whatever the labels do.
+                Asserted by TagCardLayoutTest#everyButtonCircleSitsAtTheSameHeight - on the
+                circles, because the icons inside them are deliberately different sizes (28dp for
+                history, 20dp for refresh, 18dp for the other two) and so their own tops differ by
+                design.
+            -->
+            <LinearLayout
+                android:id="@+id/tag_bottom_menu"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="top|center_horizontal"
+                android:orientation="horizontal"
+                android:paddingTop="4dp"
+                android:paddingBottom="10dp">
+
+                <LinearLayout
+                    android:id="@+id/device_history_button_container"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginLeft="8dp"
+                    android:layout_marginRight="8dp"
+                    android:background="@drawable/ripple_rounded_rect"
+                    android:clickable="true"
+                    android:gravity="top|center_horizontal"
+                    android:onClick="onClickLocationHistory"
+                    android:orientation="vertical"
+                    android:padding="5dp">
+
+                    <FrameLayout
+                        android:layout_width="40dp"
+                        android:layout_height="40dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/circle_filled"
+                        android:backgroundTint="?attr/colorSurfaceContainerHighest"
+                        android:padding="8dp"
+                        android:scaleType="fitCenter">
+
+                        <com.google.android.material.progressindicator.CircularProgressIndicator
+                            android:id="@+id/history_loading_indicator"
+                            style="@style/Widget.Material3.CircularProgressIndicator.ExtraSmall"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:indeterminate="true"
+                            android:visibility="gone"
+                            app:hideAnimationBehavior="inward"
+                            app:showAnimationBehavior="inward"
+                            app:trackColor="?attr/colorSurfaceVariant"
+                            app:trackCornerRadius="2dp" />
+
+                        <ImageView
+                            android:id="@+id/history_icon"
+                            android:tint="?attr/colorOnSurfaceVariant"
+                            android:layout_width="28dp"
+                            android:layout_height="28dp"
+                            android:layout_gravity="center"
+                            android:scaleType="fitCenter"
+                            android:src="@drawable/history_24px" />
+
+
+                    </FrameLayout>
+
+                    <TextView
+                        android:id="@+id/locationHistoryText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="@font/nunito_medium"
+                        android:gravity="center"
+                        android:maxLines="2"
+                        android:text="@string/location_history"
+                        android:textAlignment="gravity"
+                        android:textSize="10sp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/device_refresh_button_container"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="8dp"
+                    android:layout_marginRight="8dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/ripple_rounded_rect"
+                    android:clickable="true"
+                    android:gravity="top|center_horizontal"
+                    android:onClick="onClickRefresh"
+                    android:orientation="vertical"
+                    android:padding="5dp">
+
+                    <FrameLayout
+                        android:layout_width="40dp"
+                        android:layout_height="40dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/circle_filled"
+                        android:backgroundTint="?attr/colorSurfaceContainerHighest"
+                        android:padding="8dp"
+                        android:scaleType="fitCenter">
+
+                        <com.google.android.material.progressindicator.CircularProgressIndicator
+                            android:id="@+id/refresh_loading_indicator"
+                            style="@style/Widget.Material3.CircularProgressIndicator.ExtraSmall"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:indeterminate="true"
+                            android:visibility="gone"
+                            app:hideAnimationBehavior="inward"
+                            app:showAnimationBehavior="inward"
+                            app:trackColor="?attr/colorSurfaceVariant"
+                            app:trackCornerRadius="2dp" />
+
+                        <ImageView
+                            android:id="@+id/refresh_icon"
+                            android:tint="?attr/colorOnSurfaceVariant"
+                            android:layout_width="20dp"
+                            android:layout_height="20dp"
+                            android:layout_gravity="center"
+                            android:scaleType="fitCenter"
+                            android:src="@drawable/refresh_24" />
+
+
+                    </FrameLayout>
+
+                    <TextView
+                        android:id="@+id/refreshText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="@font/nunito_medium"
+                        android:gravity="center"
+                        android:maxLines="2"
+                        android:text="@string/refresh"
+                        android:textSize="10sp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/device_ring_button_container"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="8dp"
+                    android:layout_marginRight="8dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/ripple_rounded_rect"
+                    android:clickable="true"
+                    android:gravity="top|center_horizontal"
+                    android:onClick="onClickRing"
+                    android:orientation="vertical"
+                    android:padding="5dp"
+                    android:visibility="visible">
+
+                    <FrameLayout
+                        android:layout_width="40dp"
+                        android:layout_height="40dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/circle_filled"
+                        android:backgroundTint="?attr/colorSurfaceContainerHighest"
+                        android:padding="8dp"
+                        android:scaleType="fitCenter">
+
+                        <com.google.android.material.progressindicator.CircularProgressIndicator
+                            android:id="@+id/ring_loading_indicator"
+                            style="@style/Widget.Material3.CircularProgressIndicator.ExtraSmall"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:indeterminate="true"
+                            android:visibility="gone"
+                            app:hideAnimationBehavior="inward"
+                            app:showAnimationBehavior="inward"
+                            app:trackColor="?attr/colorSurfaceVariant"
+                            app:trackCornerRadius="2dp" />
+
+                        <ImageView
+                            android:id="@+id/perform_ring_icon"
+                            android:tint="?attr/colorOnSurfaceVariant"
+                            android:layout_width="18dp"
+                            android:layout_height="18dp"
+                            android:layout_gravity="center"
+                            android:scaleType="fitCenter"
+                            android:src="@drawable/volume_24" />
+
+
+                    </FrameLayout>
+
+                    <TextView
+                        android:id="@+id/ringText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="@font/nunito_medium"
+                        android:gravity="center"
+                        android:maxLines="2"
+                        android:text="@string/do_ring"
+                        android:textSize="10sp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/device_more_button_container"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="8dp"
+                    android:layout_marginRight="8dp"
+                    android:layout_weight="1"
+                    android:background="@drawable/ripple_rounded_rect"
+                    android:clickable="true"
+                    android:gravity="top|center_horizontal"
+                    android:onClick="onClickMoreForDevice"
+                    android:orientation="vertical"
+                    android:padding="5dp"
+                    android:visibility="visible">
+
+                    <FrameLayout
+                        android:layout_width="40dp"
+                        android:layout_height="40dp"
+                        android:layout_gravity="center"
+                        android:background="@drawable/circle_filled"
+                        android:backgroundTint="?attr/colorSurfaceContainerHighest"
+                        android:padding="8dp"
+                        android:scaleType="fitCenter">
+
+                        <com.google.android.material.progressindicator.CircularProgressIndicator
+                            android:id="@+id/more_loading_indicator"
+                            style="@style/Widget.Material3.CircularProgressIndicator.ExtraSmall"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:indeterminate="true"
+                            android:visibility="gone"
+                            app:hideAnimationBehavior="inward"
+                            app:showAnimationBehavior="inward"
+                            app:trackColor="?attr/colorSurfaceVariant"
+                            app:trackCornerRadius="2dp" />
+
+                        <ImageView
+                            android:id="@+id/tag_more_icon"
+                            android:tint="?attr/colorOnSurfaceVariant"
+                            android:layout_width="18dp"
+                            android:layout_height="18dp"
+                            android:layout_gravity="center"
+                            android:scaleType="fitCenter"
+                            android:src="@drawable/menu_dots_24" />
+
+                    </FrameLayout>
+
+                    <TextView
+                        android:id="@+id/moreText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:fontFamily="@font/nunito_medium"
+                        android:gravity="center"
+                        android:maxLines="2"
+                        android:text="@string/more"
+                        android:textSize="10sp" />
+                </LinearLayout>
+
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+</layout>

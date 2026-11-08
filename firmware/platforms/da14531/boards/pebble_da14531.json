@@ -1,0 +1,16 @@
+{
+  "name": "Pebble DA14531 (40 KiB application RAM, external SPI Flash)",
+  "vendor": "Pebble",
+  "url": "https://www.renesas.com/en/products/da14531",
+  "build": {
+    "cpu": "cortex-m0plus",
+    "mcu": "da14531",
+    "f_cpu": "16000000L"
+  },
+  "upload": {
+    "maximum_size": 40960,
+    "maximum_ram_size": 40960,
+    "protocol": "cmsis-dap",
+    "protocols": ["cmsis-dap"]
+  }
+}

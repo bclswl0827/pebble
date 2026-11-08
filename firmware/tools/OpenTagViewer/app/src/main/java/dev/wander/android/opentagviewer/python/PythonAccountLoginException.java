@@ -1,0 +1,151 @@
+package dev.wander.android.opentagviewer.python;
+
+import com.chaquo.python.PyObject;
+
+/**
+ * A sign-in that did not work, with enough about it to tell the user something useful.
+ *
+ * <p><b>The reason exists because the message was not enough.</b> It used to carry
+ * {@code str(e)} from Python and nothing else - and the failure people actually hit is a
+ * connection timeout, whose {@code str()} is the empty string. The screen dutifully rendered
+ * "Login failed:" followed by nothing at all, which tells somebody neither what went wrong nor
+ * what to do.
+ *
+ * <p>The reason is a code, not prose: the sentence the user reads is chosen on this side, so it
+ * can be translated. The message stays as the detail for logs and for anything unclassified.
+ */
+public class PythonAccountLoginException extends RuntimeException {
+
+    /** Nothing answered - Apple was not reached at all. Matches {@code REASON_NETWORK}. */
+    public static final String REASON_NETWORK = "network";
+
+    /**
+     * Apple wants agreement to updated terms. Matches {@code REASON_TERMS}.
+     *
+     * <p><b>The one failure here the user can actually do something about, and the only one that
+     * is not the end of the attempt.</b> Authentication worked; the exchange after it did not.
+     * Apple takes acceptance on one of its own devices or on iCloud.com and nowhere else, so a
+     * user of this app generally has neither - which is why the app shows the documents itself
+     * rather than reporting a dead end.
+     *
+     * <p>Carries {@link #getAccount()}, because agreeing needs the session that was just
+     * established.
+     */
+    public static final String REASON_TERMS = "terms";
+
+    /**
+     * Apple signed the user in and then refused to open iCloud. Matches
+     * {@code REASON_ICLOUD_REFUSED}.
+     *
+     * <p><b>Split out of {@link #REASON_TERMS}, which used to swallow it.</b> Every delegate
+     * failure was reported as terms pending, because terms were the only cause with a remedy.
+     * The response has two error channels and terms arrive on only one; when that channel is
+     * empty, the delegate refused the account itself and the terms flow has nothing to show.
+     * Issue #221 is somebody whose terms were fine being shown an empty document list.
+     *
+     * <p>Carries no account, deliberately: unlike terms, there is nothing further to do with
+     * the session from here.
+     *
+     * <p><b>Not {@link #REASON_APPLE_DECLINED}</b>, which advises waiting. Apple's own wording
+     * here says to try later, and across the clients sharing this sign-in path it does not
+     * clear on its own - so repeating that advice sends somebody to retry forever.
+     */
+    public static final String REASON_ICLOUD_REFUSED = "icloud_refused";
+
+    /**
+     * Apple answered and refused to serve. Matches {@code REASON_APPLE_DECLINED}.
+     *
+     * <p>Kept apart from {@link #REASON_NETWORK} because the advice differs: a network failure is
+     * usually the phone's and worth checking, and this one is Apple's and is not.
+     */
+    public static final String REASON_APPLE_DECLINED = "apple_declined";
+
+    /**
+     * Apple refused the first step of the sign-in, before the password was used. Matches
+     * {@code REASON_REFUSED_BEFORE_PASSWORD}.
+     *
+     * <p>Issue #248: shown verbatim as "Email verification failed", which reads as a typo in the
+     * Apple ID or password and is neither. Like {@link #REASON_APPLE_DECLINED} it offers the
+     * remote-server route, because local Anisette worked and Apple still said no - so the machine
+     * identity is the thing left to change. Unlike it, nothing here says to wait.
+     */
+    public static final String REASON_REFUSED_BEFORE_PASSWORD = "refused_before_password";
+
+    /** Anything not recognised. The detail is shown as-is rather than guessed at. */
+    public static final String REASON_UNKNOWN = "unknown";
+
+    private final String reason;
+
+    /**
+     * The half-signed-in account, for {@link #REASON_TERMS} and nothing else.
+     *
+     * <p>Null for every other reason, deliberately: an account that failed for another cause is
+     * not usable, and having one to hand is an invitation to store it - which is the bad write
+     * behind issues #43 and #119.
+     */
+    private final transient PyObject account;
+
+    /**
+     * Seconds Apple asked for before another attempt, or null when it did not say.
+     *
+     * <p><b>Null is the usual value, and means unknown rather than "retry now".</b> It comes from
+     * a {@code Retry-After} header, and no refusal from Grand Slam has been seen carrying one -
+     * so nothing may substitute a number for it. When present, it is the only reliable advice
+     * there is about how long to leave it.
+     */
+    private final Double retryAfterSeconds;
+
+    public PythonAccountLoginException(String message) {
+        this(message, REASON_UNKNOWN);
+    }
+
+    public PythonAccountLoginException(String message, String reason) {
+        this(message, reason, null);
+    }
+
+    public PythonAccountLoginException(String message, String reason, PyObject account) {
+        this(message, reason, account, null);
+    }
+
+    public PythonAccountLoginException(
+            String message, String reason, PyObject account, Double retryAfterSeconds) {
+        super(message);
+        this.reason = reason == null || reason.isBlank() ? REASON_UNKNOWN : reason;
+        this.account = account;
+        this.retryAfterSeconds = retryAfterSeconds;
+    }
+
+    public PythonAccountLoginException(String message, Throwable cause) {
+        super(message, cause);
+        this.reason = REASON_UNKNOWN;
+        this.account = null;
+        this.retryAfterSeconds = null;
+    }
+
+    public PythonAccountLoginException(Throwable cause) {
+        super(cause);
+        this.reason = REASON_UNKNOWN;
+        this.account = null;
+        this.retryAfterSeconds = null;
+    }
+
+    /** Which kind of failure this was, for choosing what to show. Never null. */
+    public String getReason() {
+        return this.reason;
+    }
+
+    /** The account to agree to terms with, or null. See {@link #REASON_TERMS}. */
+    public PyObject getAccount() {
+        return this.account;
+    }
+
+    /** How long Apple asked the user to wait, in seconds, or null. See the field. */
+    public Double getRetryAfterSeconds() {
+        return this.retryAfterSeconds;
+    }
+
+    /** Whether this is a terms failure that can actually be recovered from in the app. */
+    public boolean hasTermsToAccept() {
+        return REASON_TERMS.equals(this.reason) && this.account != null;
+    }
+}

@@ -1,0 +1,58 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+/secrets.properties
+build/
+dist/
+__pycache__/
+app/release
+.coverage
+.pytest_cache
+.mypy_cache
+.venv
+tmp/
+# Local Claude Code settings
+.claude/settings.local.json
+
+# Cache for scripts/update_adi_stub_symbols.py - copies of Apple libraries, pulled from
+# their CDN so the stub symbol lists can be regenerated. Never committed.
+.adi-libs/
+
+# Per-developer Android Studio state: test-panel column widths and the device you happen
+# to deploy to. Churns on every run, and records the model name of whatever phone is plugged
+# in - none of which belongs to anybody else working on this.
+/.idea/androidTestResultsUserPreferences.xml
+/.idea/deploymentTargetSelector.xml
+
+# Fixture-investigation notebook. Its whole job is decoding real exports, so its saved cell
+# outputs contain the very things the fixtures under app/src/test/resources/ exist to have
+# stripped: device names ("<person>'s iPad"), record UUIDs, key material. Committing it would
+# publish, in a notebook, exactly what was redacted out of the plists next to it.
+scripts/plist_explorer.ipynb
+
+# Local throwaway signing key for release builds. Never a real one.
+*.jks
+
+# Bundles the exporter writes. `python/` is where it runs from, so an export lands here whenever
+# anybody tries the wizard or the CLI - and one was committed by a `git add -A` that swept it up
+# with an unrelated change.
+#
+# **A bundle is not a build artefact.** It holds key material for somebody's real AirTags, and
+# that material cannot be revoked: the only way to withdraw an exported accessory is to unpair it.
+# So this is not about repository tidiness.
+#
+# The fixtures under app/src/androidTest/assets/ are deliberately tracked and unaffected: they are
+# built by scripts/make_*_fixture.py from invented keys, not from anyone's account.
+python/*.zip

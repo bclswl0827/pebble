@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!--
+        For DeviceInfoActivity's "play sound nearby" - direct BLE GATT to an owned accessory,
+        bypassing Apple's Find My network. Below API 31 this instead requires the location
+        permissions above, which the app already declares. neverForLocation is accurate: the
+        scan is only ever matched against a MAC address computed from the accessory's own keys
+        (see dev.wander.android.opentagviewer.ble), never used to derive or report a position.
+    -->
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="31" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- 高德地图SDK所需权限 -->
+    <!--
+        For NearbyScanService, which is what makes background scanning possible at all: a scan
+        without a foreground service is throttled to the point of uselessness. The location type
+        is required from Android 14 and is accurate - the service reads the phone's own position
+        to attribute a sighting to a place. POST_NOTIFICATIONS because the permanent notification
+        is the price of the service, and on Android 13+ it is refused without it.
+    -->
+    <!--
+        So the background scan comes back after a restart. Without it the setting quietly stops
+        meaning anything: a service does not survive a reboot, and nothing else starts this app
+        on its own, so it would be off until somebody happened to open the app again - and being
+        on while nobody is looking is the entire point of it.
+    -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <!--
+        The fallback type for starting at boot. Location is a foreground-only permission, so a
+        service of type "location" cannot start while the app has nothing visible - which is
+        exactly the situation after a restart. Scanning for a tag is a connected-device job by
+        any reading, and that type has no such restriction.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+        <!--
+            Maps applications, so "navigate to this tag" can find one.
+
+            Without this the app cannot see any package that handles geo:, and on Android 11
+            and up that is not a permission error - resolveActivity simply returns null, as
+            though nothing on the phone could open a map. The button then did nothing at all
+            and logged, which is indistinguishable from a tag having no location.
+
+            It applied to every device on Android 11 or newer, Google Maps installed or not,
+            because package visibility hid the target package too - so naming it explicitly
+            could not have worked either. See MapsActivity#onClickNavigateTo.
+        -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="geo" />
+        </intent>
+    </queries>
+
+    <application
+        android:name=".OpenAirTagApplication"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="${appLabel}"
+        android:localeConfig="@xml/locales_config"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.OpenTagViewer"
+        android:networkSecurityConfig="@xml/network_security_config"
+        tools:targetApi="31"
+        >
+
+        <service
+            android:name="androidx.appcompat.app.AppLocalesMetadataHolderService"
+            android:enabled="false"
+            android:exported="false">
+            <meta-data
+                android:name="autoStoreLocales"
+                android:value="true" />
+        </service>
+        <service
+            android:name=".service.AppNavigationService"
+            android:foregroundServiceType="location">
+        </service>
+
+        <!--
+            Listens for the owner's tags while the app is closed. Off unless the user turns it
+            on - see UserSettings.scanInBackground for why that is not merely caution.
+
+            Not exported: nothing outside the app has any business starting it, and it carries
+            no intent data that would make sense from elsewhere.
+        -->
+        <!--
+            Starts the scan again after a restart, if the user had it on. Exported so the system
+            can deliver BOOT_COMPLETED to it, which is what exported means here - no other app
+            can send it, because the broadcast is protected.
+        -->
+        <receiver
+            android:name=".service.BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".service.NearbyScanService"
+            android:exported="false"
+            android:foregroundServiceType="location|connectedDevice" />
+
+        <!--
+            Loads Apple's ADI library in a process of its own, before the app loads it in its
+            own. On some phones that library kills whatever process loads it (issue #232), and
+            this way the process it kills is this one. See TryItElsewhereFirst.
+
+            Not exported: only the app binds it.
+        -->
+        <service
+            android:name=".anisette.AppleLibraryProbeService"
+            android:exported="false"
+            android:process=":adiprobe" />
+
+        <!--
+            The emulated Mac: Apple's macOS CoreADI under Unicorn, in libmacadi.so, which is
+            loaded in this process and never in the app's. A native fault there kills this
+            process rather than the sign-in screen (AGENTS.md rule 4), and Unicorn, which is
+            GPL-2.0, stays a separate program from the rest of the APK. See MacAdiService.
+
+            Not exported: only the app binds it.
+        -->
+        <service
+            android:name=".anisette.MacAdiService"
+            android:exported="false"
+            android:process=":macadi" />
+
+        <!-- Reached only when the app cannot name what went wrong - see the class doc. -->
+        <activity
+            android:name=".ui.error.ErrorReportActivity"
+            android:exported="false"
+            android:label="@string/error_report_title" />
+
+        <activity
+            android:name=".DeviceInfoActivity"
+            android:exported="false"
+            android:theme="@style/Theme.OpenTagViewer.GenericGreyishActivity" />
+
+        <activity
+            android:name=".HistoryViewActivity"
+            android:exported="false"
+            android:theme="@style/Theme.OpenTagViewer.GenericGreyishActivity" />
+        <activity
+            android:name=".MyDevicesListActivity"
+            android:exported="false"
+            android:theme="@style/Theme.OpenTagViewer.GenericGreyishActivity" />
+        <activity
+            android:name=".FetchFromICloudActivity"
+            android:exported="false"
+            android:theme="@style/Theme.OpenTagViewer.GenericGreyishActivity" />
+        <activity
+            android:name=".AppleLoginActivity"
+            android:exported="true"
+            android:theme="@style/Theme.OpenTagViewer.GenericGreyishActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".InformationActivity"
+            android:exported="false"
+            android:label="@string/information"
+            android:theme="@style/Theme.OpenTagViewer.GenericGreyishActivity" />
+        <activity
+            android:name=".ExtraSourcesSettingsActivity"
+            android:exported="false"
+            android:theme="@style/Theme.OpenTagViewer.GenericGreyishActivity" />
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:label="@string/settings"
+            android:theme="@style/Theme.OpenTagViewer.GenericGreyishActivity" />
+        <!--
+            To add your Maps API key to this project:
+            1. Open the root project's secrets.properties file
+            2. Add this line, where YOUR_API_KEY is your API key:
+                MAPS_API_KEY=YOUR_API_KEY
+        -->
+        <!-- Google Maps API Key -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="${MAPS_API_KEY}" />
+
+        <!-- No AMap API key is declared here on purpose. AMap issues keys per developer
+             account, bound to a package name and signing fingerprint, and expects the key
+             holder to be the app's operator - so users supply their own in Settings and it
+             is applied at runtime via MapsInitializer.setApiKey. See the AMap wiki page. -->
+
+        <activity
+            android:name=".MapsActivity"
+            android:exported="false"
+            android:label="@string/title_activity_maps"
+            android:theme="@style/Theme.OpenTagViewer.MapActivity"
+            android:screenOrientation="portrait"
+            >
+        </activity>
+    </application>
+
+</manifest>

@@ -1,0 +1,4 @@
+(fp_lib_table
+	(version 7)
+	(lib (name "Pebble") (type "KiCad") (uri "${KIPRJMOD}/library/Pebble.pretty") (options "") (descr ""))
+)

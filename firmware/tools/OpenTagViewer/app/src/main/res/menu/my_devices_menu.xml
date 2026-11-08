@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    How to get tags or their history in, from a screen that already has some.
+
+    Both of these were only ever reachable from the empty state, which is hidden the moment
+    anything is imported - so after a first import there was no way back to either. That matters
+    most for the account route: the app joins the keychain precisely so a later read costs one
+    tap and no passcode, and there was nothing to tap.
+
+    The tag-import wording matches the empty-state buttons deliberately. History import is a
+    separate action because it restores reports only after their tags already exist.
+-->
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+        No icons. A PopupMenu does not draw them anyway, and the only on-brand candidate here is
+        apple.xml, whose paths are hardcoded black - it would be invisible in dark mode the day
+        somebody rendered this menu somewhere that does show them.
+    -->
+    <!--
+        **Linking, not fetching, and it goes away once done.** This is how somebody who has only
+        ever imported zips connects their account; after that the app is a member of the keychain
+        and reads it without asking anything, so offering "link" again describes work that has
+        already happened. Re-reading on demand lives in Settings, where the row says the account
+        is linked.
+    -->
+    <item
+        android:id="@+id/action_fetch_from_account"
+        android:title="@string/icloud_link_account_action" />
+
+    <!--
+        **The other half of the same row, and the one shown once linking is done.** The comment
+        above says re-reading on demand lives in Settings; it does, behind a button that opens the
+        whole iCloud flow. That is a lot of screen for "did the name I just changed arrive", and
+        this is the list where somebody would notice it had not.
+    -->
+    <item
+        android:id="@+id/action_refresh_from_account"
+        android:title="@string/refresh_from_account" />
+
+    <item
+        android:id="@+id/action_import_from_file"
+        android:title="@string/icloud_import_from_file" />
+
+    <!-- Devices that are not in an Apple export: see ExternalDeviceImporter -->
+    <item
+        android:id="@+id/action_add_openhaystack"
+        android:title="@string/add_openhaystack_key" />
+    <item
+        android:id="@+id/action_add_google"
+        android:title="@string/add_from_google" />
+    <item
+        android:id="@+id/action_import_history"
+        android:title="@string/import_history" />
+
+</menu>

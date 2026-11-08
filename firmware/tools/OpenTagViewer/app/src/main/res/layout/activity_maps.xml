@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    xmlns:map="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/map_container"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:elevation="8dp">
+
+    <FrameLayout
+        android:id="@+id/map"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="?android:attr/colorBackground"
+        tools:context=".MapsActivity" />
+
+    <!-- clipChildren/clipToPadding are both off so the cards' 8dp elevation shadow can draw
+         outside the content box. MapsActivity pads the bottom of this view by the navigation
+         bar inset, and with the default clipToPadding="true" that padding would slice the
+         shadow off along a hard edge. -->
+    <HorizontalScrollView
+        android:id="@+id/tags_scrollable_area"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentLeft="true"
+        android:layout_alignParentRight="true"
+        android:layout_alignParentBottom="true"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:scrollbarAlwaysDrawHorizontalTrack="false"
+        android:scrollbarAlwaysDrawVerticalTrack="false"
+        android:scrollbars="none"
+        tools:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/tags_scroll_container"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:clipChildren="false"
+            android:clipToPadding="false"
+            android:orientation="horizontal"
+            android:paddingLeft="16dp"
+            android:paddingRight="16dp" />
+    </HorizontalScrollView>
+
+    <LinearLayout
+        android:id="@+id/more_dropdown_top_right"
+        android:layout_width="wrap_content"
+        android:layout_height="60dp"
+        android:layout_alignParentTop="true"
+        android:layout_alignParentRight="true"
+        android:layout_marginTop="35dp"
+        android:layout_marginRight="10dp"
+        android:clipToPadding="false"
+        android:orientation="horizontal"
+        android:padding="10dp">
+
+        <ImageButton
+            android:id="@+id/button_more_settings"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:background="@drawable/ripple_background"
+            android:backgroundTint="?android:attr/colorBackground"
+            android:clickable="true"
+            android:cropToPadding="false"
+            android:elevation="8dp"
+            android:onClick="onClickMoreSettings"
+            android:padding="11dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/menu_dots_vertical_24" />
+
+    </LinearLayout>
+
+    <!-- Shown only once a fetch has been running long enough to look like a hang. A tag with
+         no key alignment record makes the first fetch search its entire history, which is
+         minutes of sequential requests with nothing to show for it on screen. Placed to the
+         left of the menu button so the two never overlap. -->
+    <TextView
+        android:id="@+id/long_fetch_banner"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentLeft="true"
+        android:layout_alignParentTop="true"
+        android:layout_marginLeft="16dp"
+        android:layout_marginTop="45dp"
+        android:layout_toLeftOf="@id/more_dropdown_top_right"
+        android:background="@drawable/layout_rounded"
+        android:backgroundTint="?android:attr/colorBackground"
+        android:elevation="8dp"
+        android:fontFamily="@font/nunito_medium"
+        android:paddingLeft="14dp"
+        android:paddingTop="10dp"
+        android:paddingRight="14dp"
+        android:paddingBottom="10dp"
+        android:text="@string/resolving_tags_banner"
+        android:textColor="?attr/colorOnBackground"
+        android:textSize="12sp"
+        android:visibility="gone"
+        tools:visibility="visible" />
+
+    <!-- Anchored above the tag cards. Note that MapsActivity must hide tags_scrollable_area
+         with INVISIBLE rather than GONE: RelativeLayout ignores layout_above when its anchor
+         is GONE, and with no other vertical rule these buttons would fall back to the top of
+         the screen, landing under the status bar. Adding layout_alignParentBottom as a
+         fallback does not work either - it is resolved after layout_above and wins, putting
+         the buttons behind the cards whenever tags are present. -->
+    <LinearLayout
+        android:id="@+id/buttons_bottom_right"
+        android:layout_width="wrap_content"
+        android:layout_height="70dp"
+        android:layout_above="@id/tags_scrollable_area"
+        android:layout_alignParentRight="true"
+        android:layout_marginRight="10dp"
+        android:layout_marginBottom="8dp"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:orientation="horizontal"
+        android:paddingLeft="10dp"
+        android:paddingTop="10dp"
+        android:paddingRight="10dp"
+        android:paddingBottom="20dp">
+
+        <ImageButton
+            android:id="@+id/button_navigate_to"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_weight="1"
+            android:background="@drawable/ripple_background"
+            android:backgroundTint="?android:attr/colorBackground"
+            android:clickable="true"
+            android:cropToPadding="false"
+            android:elevation="8dp"
+            android:focusable="true"
+            android:onClick="onClickNavigateTo"
+            android:padding="8dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/directions_24px"
+            android:visibility="visible" />
+
+        <ImageButton
+            android:id="@+id/button_my_location"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_marginLeft="10dp"
+            android:layout_weight="1"
+            android:background="@drawable/ripple_background"
+            android:backgroundTint="?android:attr/colorBackground"
+            android:clickable="true"
+            android:cropToPadding="false"
+            android:elevation="8dp"
+            android:focusable="true"
+            android:onClick="onClickMyLocation"
+            android:padding="8dp"
+            android:scaleType="fitCenter"
+            android:src="@drawable/my_location_24px"
+            android:visibility="gone" />
+
+    </LinearLayout>
+
+    <!--
+        Last child, so it is drawn over everything: with the session in this state nothing on
+        this screen can do its job, and a half-covered map invites tapping controls that will
+        silently fail. Hidden until a session actually needs a code.
+    -->
+    <include layout="@layout/two_factor_again_overlay" />
+
+</RelativeLayout>

@@ -1,0 +1,90 @@
+[project]
+name = "opentagviewer-exporter"
+requires-python = ">=3.10"
+
+# `version` is required by the packaging format and is deliberately meaningless here.
+#
+# The exporter's version is VERSION in main/version.py, and rule 9 in AGENTS.md makes that the
+# single source of truth: it reaches the window title and every export's `via:` field, and
+# scripts/release_version.py refuses a release tag that disagrees with it. A real version string
+# in this file would be a second place to change and a second place to forget.
+#
+# Nothing builds a distribution from this directory (`package = false` below), so this number
+# reaches no artifact and names nothing.
+version = "0"
+
+dependencies = [
+    # The macOS-local export route: decrypts the plists under ~/Library/com.apple.icloud.searchpartyd.
+    "pycryptodome==3.22.0",
+    # OPENTAGVIEWER.yml.
+    "PyYAML==6.0.2",
+    # AES-encrypted zip output. The stdlib's zipfile can only *read* legacy ZipCrypto, so
+    # writing an encrypted bundle needs this. Pulls pycryptodomex, which is the same library
+    # as pycryptodome above under a different namespace - both end up installed.
+    "pyzipper==0.4.0",
+    # The iCloud export route. A fork rather than a release: the iCloud keychain export work
+    # is unreleased. This becomes a plain `FindMy==<x>` pin once it lands on PyPI.
+    #
+    # **The commit is in [tool.uv.sources], and it is the same one app/build.gradle.kts
+    # installs.** It tracked the branch until it turned out that this repository ships one
+    # shared package - opentagviewer_export - to two consumers running two different FindMy.py
+    # commits: Chaquopy packages it into the APK, and the exporter runs it from source. A branch
+    # made that drift by construction, and the first API difference would have broken exactly
+    # one of them.
+    #
+    # uv.lock recorded the resolved commit, so a *build* was always reproducible - but "which
+    # FindMy.py does this repository use" still had two answers. Now it has one, asserted by
+    # test_main.py::test_the_whole_repository_pins_one_findmy.
+    #
+    # Moving it means editing three places together: here, app/build.gradle.kts, and
+    # app/src/test/python/requirements.txt, then `uv lock`.
+    "FindMy",
+    # Checkboxes and arrow-key selection for the CLI. Pure Python, no native code, and it works
+    # on Windows - which rules out curses. See main/prompts.py for what happens without a
+    # terminal, which is not "it falls back": prompt_toolkit waits for keystrokes that never come.
+    "questionary>=2.1.1",
+]
+
+[tool.uv]
+# Not a distributable package: `main/` is a program that is run, and the shared sink is
+# consumed by path (PyInstaller here, a Chaquopy source set in the app). Nothing pip-installs
+# this directory, so there is nothing to build and no version to declare.
+package = false
+
+# Intel Macs must not build cryptography from source, and 49.0.0 is where they started having to.
+#
+# cryptography publishes macOS wheels for arm64 only from 49 onward; 48.0.0 is the last with a
+# universal2 wheel, and that one targets macOS 10.9. Without a wheel, the Intel release build
+# compiles it against whatever OpenSSL the runner has - Homebrew's, preinstalled on GitHub's
+# macOS images - and PyInstaller then bundles Homebrew's libcrypto.3.dylib. A bottle's minimum
+# macOS is baked in when Homebrew builds it, so the resulting binary demanded macOS 15 and
+# scripts/check_macos_min_version.py refused it. Which was correct: the macOS-local export route
+# needs macOS 14 or earlier, so a 15-only binary is useless to exactly the people who need an
+# Intel build.
+#
+# Scoped by marker so only Intel macOS is held back - every other platform keeps the current
+# release. Remove it if cryptography ever ships an x86_64 macOS wheel again.
+constraint-dependencies = [
+    "cryptography<49 ; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+]
+
+[tool.uv.sources]
+FindMy = { git = "https://github.com/parawanderer/FindMy.py", rev = "00fd962a0e8ec9f5601fe0b9db3f16ccea252a3c" }
+
+[dependency-groups]
+# Only the release build installs this, with `uv sync --no-default-groups --group build`. It is
+# here rather than installed ad hoc in CI so the tool that freezes the binary is pinned by the
+# lockfile like everything the binary contains.
+build = [
+    "pyinstaller>=6.11.0,<7.0.0",
+]
+
+
+# Not installed by `uv sync --no-dev`, which is what the release build uses: none of this
+# belongs in a PyInstaller bundle handed to a user.
+dev = [
+    "pytest==8.4.1",
+    "pytest-cov==6.2.1",
+    "flake8>=7.0.0",
+    "pyright>=1.1.390",
+]

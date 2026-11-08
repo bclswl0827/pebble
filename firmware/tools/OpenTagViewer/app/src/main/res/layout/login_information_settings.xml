@@ -1,0 +1,112 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_margin="8dp">
+
+    <data></data>
+
+    <LinearLayout
+        android:id="@+id/login_data_container"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_marginBottom="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/current_user_info_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:fontFamily="@font/nunito_bold"
+                android:paddingLeft="8dp"
+                android:text="@string/logged_in_as"
+                android:textColor="?attr/colorOnSurfaceVariant" />
+
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_margin="0dp"
+            android:background="@drawable/layout_rounded"
+            android:backgroundTint="?attr/colorSurfaceContainerLow"
+            android:gravity="center_vertical"
+            android:orientation="vertical"
+            android:padding="16dp">
+
+            <!-- Shown until the account details arrive. Sized to match the real content so
+                 the card does not resize when they swap over. -->
+            <LinearLayout
+                android:id="@+id/login_details_placeholder"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <dev.wander.android.opentagviewer.ui.widget.SkeletonView
+                    android:layout_width="180dp"
+                    android:layout_height="24dp"
+                    android:layout_marginBottom="4dp"
+                    android:background="@drawable/layout_rounded"
+                    android:backgroundTint="?attr/colorOutlineVariant" />
+
+                <dev.wander.android.opentagviewer.ui.widget.SkeletonView
+                    android:layout_width="220dp"
+                    android:layout_height="18dp"
+                    android:background="@drawable/layout_rounded"
+                    android:backgroundTint="?attr/colorOutlineVariant" />
+
+                <dev.wander.android.opentagviewer.ui.widget.SkeletonView
+                    android:layout_width="96dp"
+                    android:layout_height="40dp"
+                    android:layout_marginTop="12dp"
+                    android:background="@drawable/layout_rounded"
+                    android:backgroundTint="?attr/colorOutlineVariant" />
+
+            </LinearLayout>
+
+            <LinearLayout
+                android:id="@+id/login_details"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone"
+                tools:visibility="visible">
+
+                <TextView
+                    android:id="@+id/firstame_lastname_settings_block"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:fontFamily="@font/nunito_bold"
+                    android:textColor="?attr/colorOnPrimaryContainer"
+                    android:textSize="20sp"
+                    tools:text="Firstname Lastname"
+                    />
+
+                <TextView
+                    android:id="@+id/email_settings_block"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    tools:text="firstname.lastname@test.com"
+                    />
+
+                <Button
+                    android:id="@+id/logout_button"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:text="@string/logout"
+                    android:textSize="14sp" />
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+    </LinearLayout>
+</layout>

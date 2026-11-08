@@ -1,0 +1,321 @@
+package dev.wander.android.opentagviewer.db.repo.model;
+
+import lombok.Builder;
+import lombok.Data;
+
+@Builder
+@Data
+public class UserSettings {
+    private Boolean useDarkTheme;
+
+    /**
+     * Whether to colour the app from the user's wallpaper (Material You) instead of the
+     * app's own palette.
+     *
+     * <p><b>Null is meaningful and must not be defaulted away</b>, for the same reason it is
+     * on {@link #anisetteMode}: "nobody has decided yet" is not "decided no". The two cases it
+     * separates want opposite answers. Somebody installing for the first time should get a app
+     * that matches their phone - the first thing they see is the login screen, which they
+     * cannot reach Settings from, so a default of off means their first impression never
+     * matches. Somebody updating should get exactly what they had yesterday, because an
+     * unannounced restyle on update is its own kind of bug.
+     *
+     * <p>So the decision belongs where the context is known - whether this install has ever
+     * been updated - rather than in a getter. See
+     * {@code OpenAirTagApplication.setupSystemColors()}, which resolves it once and stores the
+     * answer, after which this is a plain boolean.
+     *
+     * <p>Only has an effect on Android 12+, where the system exposes wallpaper-derived
+     * colours. Below that the setting is hidden rather than shown and ignored.
+     */
+    private Boolean useSystemColors;
+    private String anisetteServerUrl;
+    private String language;
+    private Boolean enableDebugData;
+    private String mapProvider; // "google" or "amap"
+
+    /**
+     * The user's own AMap (高德地图) API key.
+     * <br>
+     * Not shipped with the app: AMap keys are issued per developer account, bound to a
+     * package name and signing fingerprint, and their terms expect the key holder to be
+     * the app's operator. So anyone wanting AMap supplies their own, the same way the
+     * Anisette server URL works.
+     */
+    private String amapApiKey;
+
+    /**
+     * Where Anisette data comes from: {@link #ANISETTE_LOCAL}, {@link #ANISETTE_REMOTE}, or
+     * null meaning nobody has decided yet.
+     *
+     * <p><b>Null is meaningful and must not be defaulted away.</b> A session is bound to the
+     * machine identity that established it, and local and remote Anisette present different
+     * ones, so switching requires signing in again. Someone updating from an earlier version
+     * has a session established against their server and nothing stored here; reading that as
+     * "local" would put every existing user through a 2FA cycle on update, for no reason they
+     * could see.
+     *
+     * <p>So the decision belongs where the context is known, not in a getter - see
+     * {@link #resolveAnisetteMode(boolean)}. New sessions get local, existing ones keep what
+     * already works, and {@link #anisetteUpgradeOffered} covers inviting the latter to switch.
+     */
+    private String anisetteMode;
+
+    /**
+     * Whether the one-time offer to move an existing login to local Anisette has been made.
+     *
+     * <p>Existing users are deliberately left on their server so an update does not break
+     * their session. But local is the better position - nothing leaves the device, and no
+     * third party can take the app down - so it is worth asking once, at the moment someone
+     * can see what they would gain. Once is the operative word: a prompt that returns is a
+     * prompt people learn to dismiss without reading.
+     */
+    private Boolean anisetteUpgradeOffered;
+
+    /**
+     * An Apple Music APK the user supplied themselves, if any.
+     *
+     * <p>The app normally fetches Apple's libraries from Apple's own CDN, which serves exactly
+     * one build. When Apple replaces it, the checked-in symbol lists may no longer describe it
+     * and local Anisette stops working until the app is updated. Rather than leave people
+     * stuck, they can point at a copy of a known-good build obtained elsewhere. It is verified
+     * against the same recorded hashes either way, so an untrusted source cannot introduce
+     * anything the app would not already have accepted from Apple.
+     */
+    private String anisetteApkUri;
+
+    /**
+     * Whether the owner's own Apple devices are shown alongside their tags, and searched for.
+     *
+     * <p><b>Off unless somebody turns it on, and that is not a taste decision.</b> An iPhone,
+     * iPad or Mac is in the Find My zone and carries key material, so the app can locate one -
+     * but only through the crowd-sourced network, the same way it finds an AirTag. Apple's own
+     * app does not do that: a device reports its position to iCloud directly over its own
+     * network connection, which is a service this app does not speak. So a device shown here
+     * updates when some stranger's iPhone happens to walk past it, which for something the
+     * owner is carrying is rare and arbitrary.
+     *
+     * <p>Shown by default, that produces exactly one bug report, over and over: <i>my iPad is
+     * in the list and never moves, but the real Find My app has it - your app is broken</i>.
+     * It is not broken, it is incomplete, and the difference is invisible from the outside.
+     * Leaving these out by default means the app only shows what it can actually keep up to
+     * date, and the setting says plainly what turning them on gets you.
+     *
+     * <p>Null reads as off. See {@link #shouldShowAppleDevices()}.
+     */
+    private Boolean showAppleDevices;
+
+    /**
+     * Whether the one-time offer to connect an iCloud account has been made.
+     *
+     * <p>Reading tags live out of the account is the thing that removes the Mac from the story
+     * entirely, and it is buried in Settings where somebody who has just signed in has no reason
+     * to look. So it is worth putting in front of them once, at the moment it would help - which
+     * is the same argument, and the same mechanism, as {@link #anisetteUpgradeOffered}.
+     *
+     * <p><b>Once, and marked when shown rather than when answered.</b> A prompt that returns is
+     * a prompt people learn to dismiss without reading.
+     */
+    private Boolean icloudOfferMade;
+
+    /**
+     * Whether to keep listening for the user's tags while the app is closed.
+     *
+     * <p><b>Off unless somebody turns it on, and this one changes what the app is.</b> Without
+     * it the radio only listens while a screen is open, which makes this a display feature: it
+     * tells you what is near you while you are looking. With it the app runs a foreground
+     * service with a permanent notification, listens continuously, and writes down where your
+     * tags were heard - which is a recording feature, and one this app's users have specific
+     * reasons to want to opt into rather than receive.
+     *
+     * <p>It is also what makes the local position history worth having: the case a history
+     * answers is "where did I leave it", and the app is shut at exactly that moment.
+     *
+     * <p>Null reads as off. See {@link #shouldScanInBackground()}.
+     */
+    private Boolean scanInBackground;
+
+    /**
+     * How many seconds of silence make a tag count as left behind.
+     *
+     * <p>Adjustable because the right answer is about the person, not the tag. Somebody who
+     * wants to be caught before the end of the street wants a few seconds and will accept the
+     * occasional check that finds the tag still there; somebody who puts their bag down a lot
+     * wants a minute and no interruptions. Neither is wrong, and no single number is right for
+     * both.
+     *
+     * <p>Null means {@link #LEFT_BEHIND_AFTER_SECONDS_DEFAULT}. See
+     * {@link #resolveLeftBehindAfterSeconds()}, which also enforces the floor - below it the
+     * check cadence, not this number, decides when the alert arrives, and a setting that
+     * silently does nothing is worse than one that will not go that low.
+     */
+    private Integer leftBehindAfterSeconds;
+
+    /**
+     * The alarm sound, as a content URI string, or null/empty for the system default alarm.
+     *
+     * <p>Held as the URI the ringtone picker handed back rather than anything resolved: the
+     * sound behind it can be deleted or live on a volume that is not mounted, so it is read
+     * defensively at the moment it is played and falls back to the default there.
+     */
+    private String leftBehindSoundUri;
+
+    /**
+     * What a tag's silence has to outlast before it is worth a targeted check.
+     *
+     * <p>Well above the floor, because this is the value for everybody who never opens the
+     * setting. Erring long costs a later alert; erring short costs an alert that is wrong, and
+     * a wrong one teaches people to ignore the right one.
+     */
+    public static final int LEFT_BEHIND_AFTER_SECONDS_DEFAULT = 120;
+
+    /**
+     * The shortest silence the slider will offer.
+     *
+     * <p><b>Thirty seconds, and the number moved because the mechanism under it did.</b> While a
+     * tag going quiet was answered by a six second scan alongside the background one, thirty was
+     * unusable: tags lying in the same room were called left behind repeatedly, because the
+     * background scan does not listen anywhere near continuously - with several apps scanning,
+     * the controller reported our client as {@code mode[BALANCED, used=LOW_POWER]}, roughly a
+     * tenth of the time rather than a quarter - and the short scan that was supposed to catch
+     * the mistake never once succeeded.
+     *
+     * <p>The scan is now raised to full rate at half the wait instead, and the controller grants
+     * it: {@code mode[LOW_LATENCY, used=LOW_LATENCY]}. Every one of eight silences in a measured
+     * window was answered before the deadline, with no alert at all. So the wait no longer has
+     * to outlast the background scan's gaps on its own; it only has to leave the escalation time
+     * to work, and half of thirty seconds is enough for that in practice.
+     *
+     * <p>Practice, not proof: that rests on one person's tags in one flat over a short period,
+     * not on a distribution of sighting gaps, which is still unmeasured.
+     * {@link #LEFT_BEHIND_AFTER_SECONDS_DEFAULT} therefore stays far above here, since the
+     * default is for people whose tags are weaker and whose phones are busier.
+     *
+     * <p>What a short wait costs is not on this line: the escalation starts at half of it, so
+     * thirty seconds means the radio is at full rate for a good part of any quiet spell.
+     */
+    public static final int LEFT_BEHIND_AFTER_SECONDS_MIN = 30;
+
+    /** Beyond this the tag is somewhere else entirely and the alert has missed its moment. */
+    public static final int LEFT_BEHIND_AFTER_SECONDS_MAX = 300;
+
+    public static final String ANISETTE_LOCAL = "local";
+    public static final String ANISETTE_REMOTE = "remote";
+
+    /** The configured silence in seconds, defaulted and clamped to what the check can honour. */
+    public int resolveLeftBehindAfterSeconds() {
+        if (this.leftBehindAfterSeconds == null || this.leftBehindAfterSeconds <= 0) {
+            return LEFT_BEHIND_AFTER_SECONDS_DEFAULT;
+        }
+
+        return Math.max(LEFT_BEHIND_AFTER_SECONDS_MIN,
+                Math.min(LEFT_BEHIND_AFTER_SECONDS_MAX, this.leftBehindAfterSeconds));
+    }
+
+    public boolean hasDarkThemeEnabled() {
+        return this.useDarkTheme == Boolean.TRUE;
+    }
+
+    /** Whether anybody has chosen yet. False for anyone updating from an earlier version. */
+    public boolean hasChosenAnisetteMode() {
+        return ANISETTE_LOCAL.equals(this.anisetteMode)
+                || ANISETTE_REMOTE.equals(this.anisetteMode);
+    }
+
+    /**
+     * What to use, deciding for anyone who has not chosen.
+     *
+     * @param hasExistingSession whether there is already a signed-in account. If there is, an
+     *                           unchosen mode resolves to remote: that session is bound to the
+     *                           machine identity of whatever produced its Anisette, and moving
+     *                           it would force a re-login on update. New sessions get local.
+     */
+    public String resolveAnisetteMode(boolean hasExistingSession) {
+        if (this.hasChosenAnisetteMode()) {
+            return this.anisetteMode;
+        }
+        return hasExistingSession ? ANISETTE_REMOTE : ANISETTE_LOCAL;
+    }
+
+    /** What is stored, or null if unchosen. Prefer {@link #resolveAnisetteMode(boolean)}. */
+    public String getAnisetteMode() {
+        return this.hasChosenAnisetteMode() ? this.anisetteMode : null;
+    }
+
+    public boolean usesLocalAnisette(boolean hasExistingSession) {
+        return ANISETTE_LOCAL.equals(this.resolveAnisetteMode(hasExistingSession));
+    }
+
+    /**
+     * Whether to offer moving this login to local Anisette.
+     *
+     * <p>Only for someone already signed in, still on a server, who has not been asked before
+     * and has not chosen for themselves. Anyone who deliberately picked remote is not asked
+     * again - they answered the question by choosing.
+     */
+    public boolean shouldOfferLocalAnisette(boolean hasExistingSession) {
+        return hasExistingSession
+                && !this.hasChosenAnisetteMode()
+                && this.anisetteUpgradeOffered != Boolean.TRUE;
+    }
+
+    public boolean hasOwnAnisetteApk() {
+        return this.anisetteApkUri != null && !this.anisetteApkUri.isBlank();
+    }
+
+    /**
+     * The selected map provider, defaulting to Google Maps.
+     */
+    public String getMapProvider() {
+        return mapProvider != null && !mapProvider.isEmpty() ? mapProvider : "google";
+    }
+
+    public boolean hasAmapApiKey() {
+        return this.amapApiKey != null && !this.amapApiKey.isBlank();
+    }
+
+    /**
+     * Whether to show and search for the owner's own Apple devices - see
+     * {@link #showAppleDevices}. Null means nobody has turned it on, which is off.
+     */
+    public boolean shouldShowAppleDevices() {
+        return this.showAppleDevices == Boolean.TRUE;
+    }
+
+    /**
+     * Whether to keep listening while the app is closed - see {@link #scanInBackground}. Null
+     * means nobody has turned it on, which is off.
+     */
+    public boolean shouldScanInBackground() {
+        return this.scanInBackground == Boolean.TRUE;
+    }
+
+    /**
+     * Whether to offer connecting an iCloud account.
+     *
+     * <p>Two conditions, and between them they pick out exactly the people this helps:
+     *
+     * <ul>
+     *   <li><b>Nothing connected yet.</b> Somebody already reading their account does not need
+     *       to be asked, and asking would read as the app having lost track.</li>
+     *   <li><b>Never asked before.</b> Covers a fresh install and somebody updating from an
+     *       earlier version alike - neither has the flag - and stops the offer returning for
+     *       anyone who said no.</li>
+     * </ul>
+     *
+     * <p><b>Not while the Anisette offer is due.</b> Somebody updating qualifies for both, and
+     * two dialogs stacked on the map is how people learn to dismiss dialogs unread. Anisette
+     * goes first because it is about the session continuing to work at all; this one can wait
+     * for the next launch, and will, because nothing marks it made in the meantime.
+     *
+     * @param hasLinkedAccount whether an iCloud keychain membership is already held.
+     * @param hasExistingSession whether somebody is signed in, for the Anisette question.
+     */
+    public boolean shouldOfferICloud(
+            final boolean hasLinkedAccount, final boolean hasExistingSession) {
+
+        return !hasLinkedAccount
+                && this.icloudOfferMade != Boolean.TRUE
+                && !this.shouldOfferLocalAnisette(hasExistingSession);
+    }
+}

@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <data>
+        <variable name="handleClickBack" type="Runnable" />
+        <variable name="handleClickCloseSelection" type="Runnable" />
+        <variable name="handleClickSelectionMenu" type="Runnable" />
+        <variable name="handleClickPageMenu" type="Runnable" />
+        <variable name="selectedCount" type="String" />
+    </data>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical">
+
+        <!--
+            The two bars occupy the same place and only one is ever shown: swapping them
+            rather than mutating one keeps the normal screen exactly as it was, so nothing
+            about selection can leak into it.
+
+            The first is the variant with an overflow button, so getting tags in is reachable
+            from a screen that already has some. Both ways in used to live in the empty state
+            below, which is hidden as soon as anything is imported.
+        -->
+        <include
+            android:id="@+id/settings_top_toolbar"
+            layout="@layout/inline_top_toolbar_with_button"
+            app:onClickBack="@{handleClickBack}"
+            app:onClickMenu="@{handleClickPageMenu}"
+            app:pageTitle="@{@string/my_devices}" />
+
+        <include
+            android:id="@+id/selection_toolbar"
+            layout="@layout/inline_selection_toolbar"
+            app:onClickClose="@{handleClickCloseSelection}"
+            app:onClickMenu="@{handleClickSelectionMenu}"
+            app:selectedCount="@{selectedCount}" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/my_devices_list"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <!-- Shown instead of the list when nothing has been imported. Without it this screen
+             is a dead end on first run: the only way to import is a menu on the map, which a
+             new user has no reason to open. -->
+        <LinearLayout
+            android:id="@+id/my_devices_empty_state"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:padding="32dp"
+            android:visibility="gone"
+            tools:visibility="visible">
+
+            <ImageView
+                android:id="@+id/my_devices_empty_icon"
+                android:layout_width="72dp"
+                android:layout_height="72dp"
+                android:alpha="0.4"
+                android:contentDescription="@null"
+                android:src="@drawable/devices_24px"
+                app:tint="?attr/colorOutline" />
+
+            <TextView
+                android:id="@+id/my_devices_empty_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:fontFamily="@font/nunito_bold"
+                android:text="@string/no_devices_imported_yet"
+                android:textAlignment="center"
+                android:textColor="?attr/colorOnSurfaceVariant"
+                android:textSize="16sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="@string/import_a_zip_exported_from_a_mac"
+                android:textAlignment="center"
+                android:textColor="?attr/colorOutline"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/my_devices_empty_wiki_link"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:background="?attr/selectableItemBackground"
+                android:clickable="true"
+                android:focusable="true"
+                android:padding="4dp"
+                android:text="@string/how_do_i_get_the_zip"
+                android:textAlignment="center"
+                android:textColor="?attr/colorPrimary"
+                android:textSize="14sp" />
+
+            <!--
+              **Two buttons, not four.** A bundle and a key file are the same button - the app
+              can tell them apart by looking - and somebody with one AirTag and one
+              self-generated tag is both cases at once, so neither is a mode to be in.
+
+              Fetching is first and filled because it is the shorter road for anyone who owns
+              their tags: no desktop, no zip, no transfer. Importing stays for the two cases
+              that still need it - a tag somebody else owns, and an account this app cannot
+              read.
+            -->
+            <Button
+                android:id="@+id/my_devices_empty_fetch_button"
+                style="@style/Widget.Material3.Button"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:paddingLeft="20dp"
+                android:paddingTop="9dp"
+                android:paddingRight="20dp"
+                android:paddingBottom="9dp"
+                android:text="@string/icloud_fetch_my_tags"
+                android:textSize="16sp"
+                app:iconSize="22dp" />
+
+            <Button
+                android:id="@+id/my_devices_empty_import_button"
+                style="@style/Widget.Material3.Button.TonalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:paddingLeft="20dp"
+                android:paddingTop="9dp"
+                android:paddingRight="20dp"
+                android:paddingBottom="9dp"
+                android:text="@string/icloud_import_from_file"
+                android:textSize="16sp"
+                app:iconSize="22dp" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+</layout>

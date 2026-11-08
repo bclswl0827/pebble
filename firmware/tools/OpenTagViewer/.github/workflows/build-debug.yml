@@ -1,0 +1,295 @@
+name: Generate APK (Debug)
+env:
+  # The name of the main module repository
+  main_project_module: app
+  # The name of the App
+  app_name: OpenTagViewer
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      # only run when Android-related stuff actually changed!
+      - "app/**"
+      - "gradle/**"
+      - "build.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - "gradle.bat"
+      - "local.defaults.properties"
+      - "settings.gradle.kts"
+      # The build shells out to exactly these two, so a change to either can break it
+      # without touching anything else in this list. The rest of scripts/ cannot, and
+      # listing the whole directory booted an emulator for every docstring in it -
+      # those are checked by static-checks.yml instead.
+      - "scripts/build_unicorn_stub_wheel.py"
+      - "scripts/fetch_contributors.py"
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "app/**"
+      - "gradle/**"
+      - "build.gradle.kts"
+      - "gradle.properties"
+      - "gradlew"
+      - "gradle.bat"
+      - "local.defaults.properties"
+      - "settings.gradle.kts"
+      # The build shells out to exactly these two, so a change to either can break it
+      # without touching anything else in this list. The rest of scripts/ cannot, and
+      # listing the whole directory booted an emulator for every docstring in it -
+      # those are checked by static-checks.yml instead.
+      - "scripts/build_unicorn_stub_wheel.py"
+      - "scripts/fetch_contributors.py"
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  # The Room v1 -> v2 migration can only be exercised on a real Android runtime, so it
+  # lives in src/androidTest and needs an emulator. `./gradlew test` in the build job
+  # below runs JVM unit tests only and would silently skip it - which matters because a
+  # broken migration destroys every existing user's imported beacons and location
+  # history, and only reproduces on upgrade, never on a fresh install.
+  instrumented-tests:
+    name: Instrumented tests (emulator)
+    environment: 'Android Build'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set Up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Change wrapper permissions
+        run: chmod +x ./gradlew
+
+      - name: Create local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Inject secrets.properties
+        run: |
+          echo "MAPS_API_KEY=${{ secrets.MAPS_API_KEY || 'maps_key_default_value' }}" > secrets.properties
+
+      # **So every debug APK this repository publishes is signed by the same key.**
+      #
+      # A runner has no ~/.android/debug.keystore, so AGP generates one per run. That makes each
+      # debug APK unupgradeable over the last (INSTALL_FAILED_UPDATE_INCOMPATIBLE, and with
+      # allowBackup false an uninstall destroys the tester's imported beacons), and it makes the
+      # Maps SHA-1 restriction impossible to satisfy, which is why maps rendered blank here and
+      # not locally.
+      #
+      # Absent secret is not fatal: a fork without it falls back to the generated key and still
+      # builds, which is the behaviour a fork wants.
+      #
+      # Passed through `env` rather than interpolated into the script: the `secrets` context is
+      # not available in a step-level `if` at all, and a `${{ }}` inside a run block puts the
+      # value on the command line, where a shell trace or an injected newline can expose it.
+      - name: Write the shared debug keystore
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$DEBUG_KEYSTORE_BASE64" ]; then
+            echo "No DEBUG_KEYSTORE_BASE64 secret; AGP will generate a debug key for this run."
+            echo "APKs from this run cannot be installed over ones from another."
+            exit 0
+          fi
+          printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 -d > app/debug-keystore.jks
+          echo "Debug keystore written, $(wc -c < app/debug-keystore.jks) bytes"
+
+      # KVM is required for a hardware-accelerated emulator; without it the run times out.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # The same Gradle managed device developers run locally, rather than a second emulator
+      # defined only here. Gradle provisions and tears it down itself, so there is no action to
+      # keep in step with the AVD in app/build.gradle.kts - and "it passed locally" means it
+      # passed on this device.
+      # Output is kept so the step after this can tell "some tests failed" apart from "the run
+      # died and the rest never ran". `pipefail` so tee does not swallow Gradle's exit code.
+      - name: Run instrumented tests
+        run: |
+          set -o pipefail
+          ./gradlew :app:testEmulatorDebugAndroidTest --console=plain 2>&1 \
+            | tee instrumented-run.log
+
+      # **Did every test actually run?**
+      #
+      # A crashed instrumentation process is reported as a couple of failed tests, and those two
+      # names are whichever were in flight when it died - arbitrary, and nothing to do with the
+      # cause. The truth is in a line nobody reads: "Tests 362/543 completed", followed by
+      # "Finished 362 tests". The other 181 never ran, and the summary does not say so.
+      #
+      # That cost real time on PR #129: the two names were treated as clues for a while before
+      # the count was noticed. This turns the count into the headline.
+      - name: Check the whole suite actually ran
+        if: always()
+        run: |
+          if [ ! -f instrumented-run.log ]; then
+            echo "No run log, so nothing to check."
+            exit 0
+          fi
+
+          if grep -q "Test run failed to complete" instrumented-run.log; then
+            echo "::error::The instrumentation process died part-way through. Any test named as"\
+                 "failing above was in flight when it happened and is not the cause - look at the"\
+                 "logcat artefact, not at those names."
+          fi
+
+          # The last "Tests N/M completed" line carries both numbers.
+          expected=$(grep -oE "Tests [0-9]+/[0-9]+ completed" instrumented-run.log \
+            | tail -1 | grep -oE "/[0-9]+" | tr -d '/')
+          finished=$(grep -oE "Finished [0-9]+ tests" instrumented-run.log \
+            | tail -1 | grep -oE "[0-9]+")
+
+          if [ -z "$expected" ] || [ -z "$finished" ]; then
+            echo "Could not read a test count from the run log; leaving the verdict to Gradle."
+            exit 0
+          fi
+
+          echo "Finished $finished of $expected tests."
+
+          if [ "$finished" -lt "$expected" ]; then
+            echo "::error::Only $finished of $expected tests ran. The suite aborted - this is not"\
+                 "the same as $((expected - finished)) tests failing, and it is not the same as a"\
+                 "pass. Download the logcat artefact to see what killed the process."
+            exit 1
+          fi
+
+      # **The logcat, which is the only thing that names a crash.**
+      #
+      # The reports below are HTML summaries: useful for reading assertions, useless for a
+      # process that died. The logcat sits somewhere else entirely and was being thrown away, so
+      # a CI-only crash could be seen and never diagnosed - `Process crashed` and nothing more.
+      # Costs nothing on a green run; it is the difference between a diagnosis and a guess.
+      - name: Upload logcat and raw results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: instrumented-logcat
+          path: |
+            app/build/outputs/androidTest-results/
+            instrumented-run.log
+          if-no-files-found: ignore
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: instrumented-test-reports
+          path: app/build/reports/androidTests/
+          if-no-files-found: ignore
+
+  build:
+    environment: 'Android Build'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set current date as env variable
+        run: echo "date_today=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+
+      # Set Repository Name As Env Variable
+      - name: Set repository name as env variable
+        run: echo "repository_name=$(echo '${{ github.repository }}' | awk -F '/' '{print $2}')" >> $GITHUB_ENV
+
+      - name: Set Up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: 'zulu' # See 'Supported distributions' for available options
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Change wrapper permissions
+        run: chmod +x ./gradlew
+
+      - name: Create local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+
+      - name: Inject secrets.properties
+        run: |
+          echo "MAPS_API_KEY=${{ secrets.MAPS_API_KEY || 'maps_key_default_value' }}" > secrets.properties
+
+      # **So every debug APK this repository publishes is signed by the same key.**
+      #
+      # A runner has no ~/.android/debug.keystore, so AGP generates one per run. That makes each
+      # debug APK unupgradeable over the last (INSTALL_FAILED_UPDATE_INCOMPATIBLE, and with
+      # allowBackup false an uninstall destroys the tester's imported beacons), and it makes the
+      # Maps SHA-1 restriction impossible to satisfy, which is why maps rendered blank here and
+      # not locally.
+      #
+      # Absent secret is not fatal: a fork without it falls back to the generated key and still
+      # builds, which is the behaviour a fork wants.
+      #
+      # Passed through `env` rather than interpolated into the script: the `secrets` context is
+      # not available in a step-level `if` at all, and a `${{ }}` inside a run block puts the
+      # value on the command line, where a shell trace or an injected newline can expose it.
+      - name: Write the shared debug keystore
+        env:
+          DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$DEBUG_KEYSTORE_BASE64" ]; then
+            echo "No DEBUG_KEYSTORE_BASE64 secret; AGP will generate a debug key for this run."
+            echo "APKs from this run cannot be installed over ones from another."
+            exit 0
+          fi
+          printf '%s' "$DEBUG_KEYSTORE_BASE64" | base64 -d > app/debug-keystore.jks
+          echo "Debug keystore written, $(wc -c < app/debug-keystore.jks) bytes"
+
+      # No stub wheel to validate any more: it is generated from app/stubs/unicorn/ by
+      # generateUnicornStubWheel during the build, rather than being checked in.
+
+      # Run Tests Build
+      - name: Run gradle tests
+        run: ./gradlew test
+
+      # Covers app/src/main/python (the module Chaquopy packages into the APK).
+      # Runs on plain CPython - it imports no Android or Java types.
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install Chaquopy bridge test dependencies
+        run: python -m pip install -r app/src/test/python/requirements.txt
+
+      - name: Run Chaquopy bridge tests
+        run: python -m pytest app/src/test/python -v
+
+      # Create APK Debug
+      - name: Build Debug APK - ${{ env.main_project_module }} module
+        run: ./gradlew testDebugUnitTest assembleDebug
+
+      # Upload Artifact Build
+      # Noted For Output [main_project_module]/build/outputs/apk/debug/
+      - name: Upload APK Debug
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.date_today }} - ${{ env.app_name }} - ${{ env.repository_name }} - APK(s) debug generated
+          path: ${{ env.main_project_module }}/build/outputs/apk/debug/
+
+      # Room writes these during the build, and rule 1 requires the new one to be committed with
+      # the migration that produced it. They are generated, so somebody without an Android
+      # toolchain cannot produce one at all - and the version bump is exactly the change most
+      # likely to be written by somebody who cannot build. Published so it can be taken from here
+      # and committed. Always, so a failed run that still got far enough is not a dead end.
+      - name: Upload the exported Room schemas
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: room-schemas
+          path: ${{ env.main_project_module }}/schemas/
+          if-no-files-found: warn

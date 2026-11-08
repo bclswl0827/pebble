@@ -1,0 +1,461 @@
+<resources>
+    <string name="app_name" translatable="false">OpenTagViewer</string>
+    <string name="nav_header_title">Android Studio</string>
+    <string name="nav_header_subtitle" translatable="false">android.studio@android.com</string>
+    <string name="nav_header_desc">Navigation header</string>
+    <string name="action_settings">Settings</string>
+
+    <string name="menu_home">Home</string>
+    <string name="menu_gallery">Gallery</string>
+    <string name="menu_slideshow">Slideshow</string>
+    <string name="title_activity_maps" translatable="false">MapsActivity</string>
+
+    <!-- Extra Keys -->
+    <string name="settings">Settings</string>
+    <string name="do_import">Import</string>
+    <string name="information">Information</string>
+    <string name="last_updated_x">Last Updated: %1$s</string>
+    <string name="location_history">Location History</string>
+    <string name="refresh">Refresh</string>
+    <string name="do_ring">Ring</string>
+    <string name="more">More</string>
+
+    <!-- Preference Titles -->
+
+    <!-- Messages Preferences -->
+
+    <!-- Sync Preferences -->
+    <string name="version_x">Version %1$s</string>
+    <string name="free_opensource_software_by">Free, Open-Source Software by:</string>
+    <string name="app_website" translatable="false"><a href="https://wander.dev">wander.dev</a></string>
+    <!-- TODO: Remove or change this placeholder text -->
+    <string name="title_placeholder" translatable="false">Placeholder</string>
+    <string name="github">Github</string>
+    <string name="anisette_server_url">Anisette Server URL</string>
+    <string name="url_to_an_anisette_server">Url to an <a href="">Anisette</a> server</string>
+    <string name="this_is_not_a_valid_url">This is not a valid url</string>
+    <string name="language">Language</string>
+    <string name="_current_locale">default</string>
+    <string name="lang_en">English</string>
+    <string name="lang_nl">Nederlands</string>
+    <string name="lang_de">Deutsch</string>
+    <string name="lang_fr">Français</string>
+    <string name="lang_ru">Русский</string>
+    <string name="lang_zh_cn">简体中文</string>
+    <string name="lang_zh_tw">繁體中文</string>
+    <string name="anisette_server_at_x_could_not_be_reached">Anisette server at %1$s could not be reached!</string>
+    <string name="welcome">Welcome !</string>
+    <string name="login_failed_x">Login failed: %1$s</string>
+    <string name="email_or_phone_number">Email or Phone Number</string>
+    <string name="password">Password</string>
+    <string name="apple_account">Apple Account</string>
+    <string name="login">Login</string>
+    <string name="auth_by_sms_to_x">SMS (%1$s)</string>
+    <string name="auth_by_trusted_device">Trusted Device</string>
+    <string name="choose_your_server">Choose your Server</string>
+    <string name="choose_2fa_authentication_method">Choose a 2FA Authentication Method</string>
+    <string name="logging_in">Logging In ...</string>
+    <string name="enter_the_verification_code_sent_to_your_apple_devices">Enter the verification code sent to your Apple devices.</string>
+    <string name="enter_the_verification_code_sent_to_your_number_x">Enter the verification code sent to your phone number: %1$s</string>
+    <string name="requesting_code">Requesting Code ...</string>
+    <string name="two_factor_authentication">Two-factor authentication</string>
+    <string name="logged_in_as">Logged In As</string>
+    <string name="logout">Logout</string>
+    <string name="enable_location_permissions">Enable Location Permissions?</string>
+    <string name="decline">Decline</string>
+    <string name="accept">Accept</string>
+    <string name="location_permissions_will_only_be_used_to_visualise_on_map_text">Your location will only be used to visualise your current position on the map, and will never leave your device.</string>
+    <string name="my_devices">My Devices</string>
+    <string name="no_last_location_known">No last location known</string>
+    <string name="today">Today</string>
+    <string name="yesterday">Yesterday</string>
+    <string name="x_data_points">%1$d data points</string>
+    <string name="dark_theme">Dark Theme</string>
+    <string name="light_theme">Light Theme</string>
+    <string name="use_system_default">Use System Default</string>
+    <string name="theme">Theme</string>
+    <string name="test">Test</string>
+    <string name="cancel">Cancel</string>
+    <string name="history_x">History: %1$s</string>
+    <string name="retry">Retry</string>
+    <string name="error_occurred_while_fetching_history">Error occurred while fetching history</string>
+    <string name="are_you_sure_you_want_to_logout">Are you sure you want to logout?</string>
+    <string name="enable_debug_data">Enable debug data</string>
+    <string name="device_name">Device name</string>
+    <string name="exported_by">Exported by</string>
+    <string name="exported_at">Exported at</string>
+    <string name="debug_beacon_id" translatable="false">Beacon Id</string>
+    <string name="debug_naming_record_id" translatable="false">Naming Record Id</string>
+    <string name="debug_naming_record_creation_time" translatable="false">Naming Record Creation Time</string>
+    <string name="debug_naming_record_modification_time" translatable="false">Naming Record Modification Time</string>
+    <string name="debug_naming_record_modifed_by_device" translatable="false">Naming Record Modified By</string>
+    <string name="ipad" translatable="false">iPad</string>
+    <string name="airtag" translatable="false">AirTag</string>
+    <string name="type">Type</string>
+    <string name="unknown">Unknown</string>
+    <string name="debug_battery_level" translatable="false">Battery level</string>
+    <string name="debug_ble_status_byte" translatable="false">BLE status byte</string>
+    <string name="debug_device_model" translatable="false">Device Model</string>
+    <string name="debug_pairing_date" translatable="false">Pairing Date</string>
+    <string name="debug_product_id" translatable="false">Product Id</string>
+    <string name="debug_system_version" translatable="false">System Version</string>
+    <string name="debug_vendor_id" translatable="false">Vendor Id</string>
+    <string name="imported_at">Imported At</string>
+    <string name="loading_location_data_for_x_new_imported_devices">Loading location data for %1$d new imported devices ...</string>
+    <string name="error_occurred_while_importing_new_devices_try_to_restart_the_app_and_retry">Error occurred while importing new devices. Try to restart the app and retry.</string>
+    <string name="error_occurred_for_2fa_attempt">Error occurred for 2FA attempt</string>
+    <string name="settings_were_updated">Settings were updated</string>
+    <string name="error_updating_settings">Error updating settings</string>
+    <string name="remove_device">Remove Device</string>
+    <string name="are_you_sure_you_want_to_remove_this_device_once_removed_it_will_need_to_be_reimported_to_get_it_back">Are you sure you want to remove this device? Once removed, it will need to be re-imported to get it back.</string>
+    <string name="confirm">Confirm</string>
+    <string name="anisette_url_change_warning">When you change your Anisette URL, you will have to re-login to the Anisette server. Confirming this change will bring you to the login page.</string>
+    <string name="device_icon">Device Icon</string>
+    <string name="device_settings">Device settings</string>
+    <string name="device_information">Device information</string>
+    <string name="debug_information" translatable="false">Debug information</string>
+    <string name="copied_x_to_clipboard">Copied \'%1$s\' to clipboard</string>
+    <string name="debug_device_name" translatable="false">Device Name (original)</string>
+    <string name="debug_device_emoji" translatable="false">Device Emoji (original)</string>
+    <string name="app_wiki">App Wiki</string>
+    <string name="twofactor_failed_x">Two-Factor Authentication failed: %1$s</string>
+    <string name="twofactor_failed_x_help_msg">Two-Factor Authentication failed: %1$s \nMaybe try a different Anisette server or Apple account?</string>
+    <string name="error_occurred_please_retry_submitting_your_2fa_code">Error occurred. Please retry submitting your 2FA code</string>
+    <string name="failed_to_request_code_please_try_again">Failed to request code. Please try again.</string>
+    <string name="lang_ko">한국어</string>
+    <string name="lang_ja">日本語</string>
+    <string name="map_provider">Map Provider</string>
+    <string name="map_provider_google">Google Maps</string>
+    <string name="map_provider_amap">高德地图 (AMap)</string>
+    <string name="map_provider_osm">OpenStreetMap</string>
+    <string name="amap_api_key" translatable="false">AMap API Key</string>
+    <string name="amap_api_key_explanation">AMap requires each user to supply their own API key. Register one at lbs.amap.com, choosing "Android SDK" as the platform, and paste it here.</string>
+    <string name="amap_copy_registration_details">Copy package name and SHA1</string>
+    <string name="amap_registration_details_copied">Copied. Paste these into the AMap console when creating your key.</string>
+    <string name="amap_key_required">AMap needs your own API key. Enter one to use this provider.</string>
+    <string name="amap_key_saved">AMap API key saved.</string>
+    <string name="amap_key_cleared">AMap API key removed.</string>
+    <string name="amap_how_to_get_a_key">How to get a key</string>
+    <string name="resolving_tags_banner">Locating your tags for the first time. They appear as they are found, most recently seen first — please keep the app open.</string>
+    <string name="resolving_tags_banner_progress">Locating your tags (%1$d of %2$d). They appear as they are found, most recently seen first — please keep the app open.</string>
+    <string name="maps_api_key_missing_title">Google Maps API key missing</string>
+    <string name="maps_api_key_missing_message">This build has no Google Maps API key, so the map will not load. Add MAPS_API_KEY to secrets.properties and rebuild, or pick a different map provider in Settings.</string>
+    <string name="no_devices_imported_yet">No devices yet</string>
+    <string name="import_a_zip_exported_from_a_mac">Fetch the tags on your Apple account, or import a file somebody exported for you.</string>
+    <string name="import_devices">Import Devices</string>
+    <string name="error_occurred_while_removing_the_device">An error occurred while removing the device</string>
+    <string name="how_do_i_get_the_zip"><u>How do I get the zip?</u></string>
+    <string name="anisette_mode_title">Sign-in data</string>
+    <string name="anisette_mode_local">On this device</string>
+    <string name="anisette_mode_remote">Remote server</string>
+    <string name="anisette_mode_local_summary">Produced on your phone. Nothing about signing in reaches anyone else, and no outage elsewhere can stop it.</string>
+    <string name="anisette_mode_remote_summary">A public Anisette server does it for you. Its operator can see that traffic, and sign-in stops working when their server does.</string>
+    <string name="anisette_mode_change_warning">You will have to sign in again. Apple ties a session to whatever produced its sign-in data, so changing this looks like a new device.</string>
+    <string name="anisette_local_status_ready">Ready</string>
+    <string name="anisette_local_status_pending">Sets itself up the next time you sign in</string>
+    <string name="anisette_local_status_unavailable">Not working: %1$s</string>
+    <string name="anisette_local_needs_own_file">Apple has replaced the file this needs, so it can no longer set itself up. You can supply a copy of %1$s yourself, or use a remote server instead.</string>
+    <string name="anisette_choose_apk">Choose a file</string>
+    <string name="anisette_apk_in_use">Using the file you chose</string>
+    <string name="anisette_apk_use_apple_again">Go back to Apple\'s copy</string>
+    <string name="anisette_apk_rejected">That file is not the version this needs (%1$s).</string>
+    <string name="anisette_where_to_get_apk">Where to find it</string>
+    <string name="anisette_learn_more">About Anisette servers</string>
+    <string name="anisette_upgrade_title">Sign in without a middleman</string>
+    <string name="anisette_upgrade_message">Your phone can now do this itself, instead of going through a public Anisette server that sees the traffic and takes sign-in down with it. Switching costs one sign-in.</string>
+    <string name="anisette_upgrade_switch">Switch and sign in</string>
+    <string name="anisette_upgrade_later">Not now</string>
+    <string name="anisette_upgrade_later_hint">You can switch later in Settings.</string>
+    <string name="anisette_local_status_checking">Checking…</string>
+    <string name="anisette_login_needs_server">This device could not set up sign-in on its own, so a server has to do it this time. You can change this later in Settings.</string>
+    <string name="anisette_provider">Anisette Provider</string>
+    <string name="use_system_colors">Use system colors</string>
+    <string name="use_system_colors_description">Color the app from your wallpaper. Needs Android 12 or later.</string>
+    <string name="export_history">Export History</string>
+    <string name="selected">Selected</string>
+    <string name="x_selected">%1$d selected</string>
+    <string name="exit_selection">Stop selecting</string>
+    <string name="history_exported">History exported</string>
+    <string name="error_occurred_while_exporting_the_history">Could not export the history</string>
+    <string name="are_you_sure_you_want_to_remove_these_devices">Are you sure you want to remove these devices? Once removed they will need to be reimported to get them back.</string>
+    <string name="remove_devices">Remove Devices</string>
+    <string name="export_tags">Export Tags</string>
+    <string name="import_failed_not_a_zip">That file is not a zip. Choose the zip file the OpenTagViewer exporter made.</string>
+    <string name="import_failed_not_an_export">This zip was not made by the OpenTagViewer exporter, so there is nothing to import.</string>
+    <string name="import_failed_damaged">This export could not be read. It may be incomplete, or made by a newer version of the exporter.</string>
+    <string name="import_failed_no_tags">This export does not contain any tags, so there is nothing to import.</string>
+    <string name="import_failed_unreadable">That file could not be opened. Choose it again.</string>
+    <string name="bundle_locked_title">This bundle is locked</string>
+    <string name="bundle_locked_message">Enter the code the exporter showed when it made this file. Capital letters, spaces and dashes do not matter.</string>
+    <string name="bundle_locked_hint">Unlock code</string>
+    <string name="bundle_unlock">Unlock</string>
+    <string name="import_failed_wrong_passcode">That code did not open the bundle. Check it against the one the exporter showed.</string>
+    <string name="import_failed_locked">This bundle is locked and no code was entered.</string>
+    <string name="bundle_passcode_malformed">A code is made of digits and letters only.</string>
+    <string name="bundle_passcode_group_separator" translatable="false">-</string>
+    <string name="session_expired_title">Please sign in again</string>
+    <string name="session_expired_message">Apple no longer accepts the saved sign-in for this device, so your tags cannot be located until you sign in again.
+
+Your tags and their location history stay on this phone — nothing has been lost.</string>
+    <string name="ok">OK</string>
+    <string name="custom_tag">Self-generated tag</string>
+    <string name="custom_tag_explained">An OpenHaystack-style tag. Its keys were generated by whoever made it and were never in an Apple account, so it has no name, emoji or battery level from Apple — set your own below.</string>
+    <string name="custom_tag_keys_remaining">%1$d pre-generated keys</string>
+    <string name="login_failed_network">Could not reach Apple. Check your connection and try again.</string>
+    <string name="terms_title">Apple needs your agreement</string>
+    <string name="terms_intro">Your password was accepted, but Apple is waiting for you to agree to these terms before the account can be used. They are shown in full below — this is what you would be agreeing to.</string>
+    <string name="terms_document_x_of_y">Document %1$d of %2$d</string>
+    <string name="terms_agree">Agree</string>
+    <string name="terms_cannot_be_accepted_here">Apple gave no way to record agreement to this document, so it cannot be accepted here. Signing in at icloud.com may work instead.</string>
+    <string name="terms_recording_agreement">Recording your agreement…</string>
+    <string name="terms_fetching">Fetching the terms from Apple…</string>
+    <string name="login_failed_terms">Signing in got as far as your account and then stopped. If that is about terms of service, they can be shown and accepted here. If it is about something else, accepting terms will not fix it.</string>
+    <string name="icloud_fetch_my_tags">Fetch my tags from my Apple account</string>
+    <string name="icloud_import_from_file">Import tags from a file</string>
+    <string name="icloud_unlock_title">Unlock your Apple keychain</string>
+    <string name="icloud_unlock_body">This needs the screen-lock passcode of one of your Apple devices — its PIN or login password, not your Apple ID password.</string>
+    <string name="icloud_unlock_choose_device">Which device’s passcode do you have?</string>
+    <string name="icloud_passcode_hint">Screen-lock passcode</string>
+    <string name="icloud_passcode_rejected">That was not accepted. It is worth trying the same passcode again — this check sometimes fails and then works.</string>
+    <string name="icloud_attempt_x_of_y">Attempt %1$d of %2$d</string>
+    <string name="icloud_no_tags_title">No tags owned by this account</string>
+    <string name="icloud_no_tags_body">Tags are registered by an iPhone or iPad, and only that account can unlock them. This account has no device that can.</string>
+    <string name="icloud_no_tags_shared_note"><b>If a friend shared their tags with you in Find My</b>, that sharing does not include the keys this app needs. Ask them to export a bundle for you, and import it here.</string>
+    <string name="icloud_service_unsure_title">Could not check your account just now</string>
+    <string name="icloud_service_unsure_body">Apple reported nothing usable at all, which usually means the service is having a bad day rather than anything being wrong with your account. Worth trying again later.</string>
+    <string name="icloud_try_again">Try again</string>
+    <string name="icloud_found_x_tags">Found %1$d tags in your Apple account</string>
+    <string name="icloud_x_were_not_tags">%1$d other items on this account carry no location key, so nothing can find them.</string>
+    <string name="settings_icloud_switch">Read my tags from my Apple account</string>
+    <string name="settings_icloud_switch_summary">Turning this off stops reading your tag list. It does not remove OpenTagViewer from your Apple device list — that is yours to do in Apple’s own settings.</string>
+    <string name="icloud_results_title">What is on your Apple account</string>
+    <string name="icloud_unlock_action">Unlock</string>
+    <string name="icloud_results_done">Done</string>
+    <string name="icloud_device_badges">%1$s  ·  %2$s</string>
+    <string name="icloud_device_added_on">added %1$s</string>
+    <string name="icloud_send_your_friend_the_guide">Show your friend how to export</string>
+    <string name="icloud_loading_title">Reading your Apple account</string>
+    <string name="icloud_loading_looking_for_devices">Looking for a device that can unlock it…</string>
+    <string name="icloud_loading_unlocking">Unlocking, then reading your tags…</string>
+    <string name="icloud_loading_importing">Bringing your tags in…</string>
+    <string name="cannot_remove_account_tag_title">Remove it in Find My</string>
+    <string name="cannot_remove_account_tag_message">This tag comes from your Apple account, so the app only holds a copy of it. Remove it in Find My on an Apple device, and it will go from here the next time the app reads your account.</string>
+    <string name="cannot_remove_account_tags_message">These tags come from your Apple account, so the app only holds copies of them. Remove them in Find My on an Apple device, and they will go from here the next time the app reads your account.</string>
+    <string name="remove_devices_but_keep_account_ones">%1$d of these came from your Apple account and will stay — remove those in Find My on an Apple device. The rest will be removed from this app.</string>
+    <string name="source">Source</string>
+    <string name="source_your_apple_account">Read from your Apple account</string>
+    <string name="vendor_lookup_hint">%1$s is a Bluetooth SIG company identifier. Tap to look it up and find out who made this.</string>
+    <string name="rename_failed_title">The name was not changed</string>
+    <string name="rename_failed_message">This tag is named in your Apple account, so renaming it has to reach Apple — and that did not work just now. Nothing has changed. Check your connection and try again.</string>
+    <string name="icloud_fetch_from_settings_subtitle">Add the tags on your account, or update the ones already here</string>
+    <string name="icloud_fetch_from_settings_linked">Linked to your Apple account. Tap to check for new or changed tags.</string>
+    <string name="icloud_link_account_action">Link tags via Apple account</string>
+    <string name="tag_ignored_summary">No updates for months — paused checking</string>
+    <string name="tag_ignored_retry">Check now</string>
+    <string name="debug_last_scan_attempt">Last fetch attempt</string>
+    <string name="debug_last_result_at">Last result</string>
+    <string name="debug_backoff_state">Fetch backoff</string>
+    <string name="debug_backoff_normal">Normal</string>
+    <string name="debug_backoff_waiting">Backing off — %1$d empty searches, next attempt %2$s</string>
+    <string name="debug_backoff_ignored">Ignored since %1$s — nothing found across months of history</string>
+    <string name="debug_never">Never</string>
+    <string name="tag_ignored_explanation">Nothing has been found for this tag anywhere in months of history, so the app stopped searching for it automatically. Searching for one of these is slow, and it is unlikely to be found. Tap below to look again right now.</string>
+    <string name="tag_ignored_retrying">Looking for this tag again. This can take a few minutes.</string>
+    <string name="battery_level_described">%1$d — %2$s</string>
+    <string name="battery_level_unknown">Not reported yet</string>
+    <string name="battery_level_full">Full (100%)</string>
+    <string name="battery_level_medium">Medium (~50-70%)</string>
+    <string name="battery_level_low">Low (~20%) — iOS starts warning here</string>
+    <string name="battery_level_very_low">Critically low (~5-10%) — near death</string>
+    <string name="battery_level_icloud_only">Only tags read from iCloud ever update this. A tag imported from a file keeps whatever value it had when the export was made.</string>
+    <string name="icloud_unlink_title">Unlink my Apple account</string>
+    <string name="icloud_unlink_subtitle">Stop this app reading tags from your account</string>
+    <string name="icloud_unlink_confirm_title">Unlink your Apple account?</string>
+    <string name="icloud_unlink_confirm_message">This app will stop reading your tags from Apple. Tags you have already imported stay on this device, along with their location history — but they will no longer be updated from your account.
+
+This does not remove this app from your Apple account. To do that, open Find My on an Apple device and remove it there.
+
+You can link again later. That needs your Apple device passcode.</string>
+    <string name="icloud_unlink_confirm_button">Unlink</string>
+    <string name="icloud_unlink_done">Your Apple account is no longer linked</string>
+    <string name="icloud_unlink_failed">Could not unlink your Apple account. Please try again.</string>
+    <string name="no_app_to_open_a_map_with">No app on this phone can open a map</string>
+    <string name="icloud_loading_opening_account">Opening your Apple account…</string>
+    <string name="icloud_loading_waiting_for_location_check">Waiting for the location check to finish…</string>
+    <string name="export_logs">Export Logs</string>
+    <string name="log_file_has_been_exported_successfully">Log file has been exported successfully</string>
+    <string name="failed_to_export_log_file">Could not export the log file</string>
+    <string name="show_apple_devices">Show my Apple devices</string>
+    <string name="show_apple_devices_explainer">Your iPhones, iPads and Macs can only be located here through the Find My network, the same way an AirTag is. That means they update rarely and unpredictably, unlike Apple\'s own app, which reads the position a device reports to iCloud itself. Off by default because that coverage is fundamentally incomplete. While off, these devices are neither shown nor searched for.</string>
+    <string name="show_apple_devices_help_link">Help build full support →</string>
+    <string name="no_app_to_open_a_link_with">No app on this phone can open a web link</string>
+    <string name="reorder_tag">Drag to reorder</string>
+    <string name="move_to_top">Move to top</string>
+    <string name="two_factor_again_title">Apple needs a verification code</string>
+    <string name="two_factor_again_message">Your session is still signed in, but Apple has asked for a code again. Enter it to carry on — nothing can be located until you do.</string>
+    <string name="two_factor_again_sign_out">Sign out instead</string>
+    <string name="two_factor_again_wrong_code">That code was not accepted. %1$d attempts left.</string>
+    <string name="two_factor_again_giving_up">That code was not accepted. Signing out — you will need to sign in again.</string>
+    <string name="icloud_offer_title">Read your tags from iCloud?</string>
+    <string name="icloud_offer_message">This app can connect to your Apple account and read your tags from it directly. New tags show up on their own, renaming one writes it back, and there is no zip to export from a Mac.
+
+You can set this up now, or any time later from Settings.</string>
+    <string name="icloud_offer_set_up_now">Set up now</string>
+    <string name="icloud_offer_not_now">Not now</string>
+    <string name="icloud_registered_title">This app is a device on your Apple account</string>
+    <string name="icloud_registered_body"><b>Do not remove this entry.</b>\n\nApple shows it beside “If you do not recognise this device”, so it looks like something to tidy up. Removing it stops this app reading your tags — at best you will have to sign in and enter a verification code again, and it can sign you out completely.\n\nApple names the entry itself, so the serial ^1 is the only thing that tells it apart from a real Mac. Every fresh install adds another one.</string>
+    <string name="icloud_registered_lead">%1$s lists this app as one of your devices:</string>
+    <string name="icloud_registered_link">See your devices at ^1</string>
+    <string name="icloud_results_next">Next</string>
+    <string name="icloud_registered_serial_label">Serial Number: ^1</string>
+    <string name="icloud_registered_model_and_os">%1$s (%2$s)</string>
+    <string name="error_report_title">This one is a bug</string>
+    <string name="error_report_body">Something came back that this app does not know how to read, so retrying will not help and there is nothing to change in your settings.\n\nThat usually means Apple altered something. A report with the log attached is what makes it fixable — the log almost always says which part.</string>
+    <string name="error_report_button">Report this</string>
+    <string name="error_report_needs_github">Opens GitHub, which will ask you to sign in or create an account first.</string>
+    <string name="error_report_share_log">Get the log</string>
+    <string name="error_report_log_cleaned">The log is cleaned before it leaves the app: %1$s</string>
+    <string name="error_report_log_unavailable">The log cannot be shared right now, because the part of the app that removes personal details from it is not running. Reporting without it still helps.</string>
+    <string name="error_report_what_failed">What failed</string>
+    <string name="error_report_body_import">The app could not read that file, and cannot say what is wrong with it — so trying again with the same file will not help.\n\nIf it came from the exporter it should have worked, which makes this worth reporting. The log usually says which part it stopped on.</string>
+    <string name="imported_but_not_located_title">Your tags are imported</string>
+    <string name="imported_but_not_located_body">They are saved on this phone and will stay there. What did not work was asking Apple where they are:\n\n%1$s\n\nThat is usually the Anisette server your sign-in goes through — when a public one is down, locations stop arriving while everything else looks fine. Producing sign-in data on this device instead avoids depending on anyone else’s server.\n\nThe app keeps trying every minute, so a brief outage sorts itself out.</string>
+    <string name="imported_but_not_located_open_settings">Sign-in data</string>
+    <string name="error_report_close">Close</string>
+    <string name="error_report_log_how">How do you want the log?</string>
+    <string name="error_report_log_copy">Copy it, to paste into the report</string>
+    <string name="error_report_log_save">Save it as a file, to attach</string>
+    <string name="error_report_log_copied">The log has been copied</string>
+    <string name="export_logs_cannot_be_cleaned">The log could not be saved, because the part of the app that removes personal details from it is not running. Nothing was written — an uncleaned log is not worth handing out.</string>
+    <string name="export_logs_cleaned">Log saved. It was cleaned first: %1$s</string>
+    <string name="exported_with">Exported with</string>
+    <string name="exported_with_something_unrecorded">Not recorded — an older exporter</string>
+    <string name="exported_tags_title">Sent, and locked</string>
+    <string name="exported_tags_body">The person you send this file to needs the code below to open it.\n\nSend it to them separately — a code sent in the same message as the file is in the same place as the file, and anyone who has both can locate these tags until you unpair them.</string>
+    <string name="exported_tags_copy_code">Copy the code</string>
+    <string name="exported_tags_code_copied">Copied</string>
+    <string name="exported_tags_not_recoverable">This code is not stored anywhere and cannot be shown again.</string>
+    <string name="export_tags_nothing_to_export">“%1$s” cannot be exported: this app has no naming record for it, and a bundle without one imports as nothing. Tags read from your Apple account are shared through Find My rather than through a file.</string>
+    <string name="export_tags_could_not_write">The file could not be written. Nothing was saved.</string>
+    <string name="error_report_body_export">The app could not build a bundle from the tags you picked, and cannot say why — so trying again with the same tags will not help.\n\nNothing was sent and nothing on this phone has changed. Your tags are still here.</string>
+    <string name="imported_from_x">Most recently imported from %1$s</string>
+    <string name="imported_from_nothing">No tags imported from a file</string>
+    <string name="refresh_from_account">Refresh from Apple account</string>
+    <string name="refresh_from_account_done">Up to date with your Apple account</string>
+    <string name="refresh_from_account_failed">Could not reach your Apple account just now. Your tags are unchanged.</string>
+    <string name="error_report_log_too_big_to_copy">This log is too large to copy. Save it as a file and attach that instead.</string>
+    <string name="play_sound_nearby">Play Sound Nearby</string>
+    <string name="play_sound_searching">Searching nearby over Bluetooth…</string>
+    <string name="play_sound_success">Playing sound now.</string>
+    <string name="play_sound_not_nearby">Not found nearby. Move closer and try again.</string>
+    <string name="play_sound_no_sound_service">Connected, but this accessory has no sound service.</string>
+    <string name="play_sound_no_candidate_macs">Could not compute this accessory\'s current address.</string>
+    <string name="play_sound_permission_denied">Bluetooth permission is needed to play the sound nearby.</string>
+    <string name="play_sound_failed">Could not play the sound. Try again.</string>
+    <string name="stop_ringing">Stop</string>
+    <string name="play_sound_connecting">Found nearby, connecting…</string>
+    <string name="play_sound_sending">Sending sound command…</string>
+    <string name="ring_status_scanning">Scanning…</string>
+    <string name="ring_status_connecting">Connecting…</string>
+    <string name="ring_status_triggering">Sending…</string>
+    <string name="ring_status_success">Ringing!</string>
+    <string name="nearby_now">Nearby</string>
+    <string name="nearby_now_with_battery">Nearby · Battery %1$s</string>
+    <string name="nearby_now_with_battery_and_signal">Nearby (%2$s) · Battery %1$s</string>
+    <string name="battery_from_tag_itself">Read from the tag over Bluetooth just now, not from iCloud.</string>
+    <string name="battery_short_full">full</string>
+    <string name="battery_short_medium">medium</string>
+    <string name="battery_short_low">low</string>
+    <string name="battery_short_very_low">critical</string>
+    <string name="battery">Battery</string>
+    <string name="heard_over_bluetooth">Over Bluetooth</string>
+    <string name="last_seen">Last seen</string>
+    <string name="signal">Signal</string>
+    <string name="seen_just_now">just now</string>
+    <string name="scan_in_background">Keep listening in the background</string>
+    <string name="scan_in_background_explainer">Listens for your tags even when the app is closed, and records where they were heard. Needs a permanent notification, and uses more battery. Off by default.</string>
+    <string name="background_scan_channel">Background scanning</string>
+    <string name="background_scan_channel_description">Shown while the app is listening for your tags in the background.</string>
+    <string name="background_scan_notification_title">Listening for your tags</string>
+    <string name="background_scan_notification_text">Tap to open the map.</string>
+    <string name="left_behind_channel">Left behind</string>
+    <string name="left_behind_channel_description">Alerts you when a tag stops being heard and you have moved away from it.</string>
+    <string name="left_behind_title">%1$s stayed behind</string>
+    <string name="left_behind_text">Last heard where you were %1$s. Tap to see the place.</string>
+    <string name="warn_if_left_behind">Warn if left behind</string>
+    <string name="warn_if_left_behind_explainer">Sounds an alarm when this tag stops being heard and you have moved on. Needs background listening to be on.</string>
+    <string name="left_behind_seconds_label">Warn after %1$d seconds</string>
+    <string name="left_behind_seconds_explainer">How long a tag has to go unheard before the app decides you have left it behind. It listens at full power from halfway through that time, so a shorter wait warns you sooner and costs more battery.</string>
+    <string name="left_behind_sound">Alarm sound</string>
+    <string name="left_behind_sound_default">Default alarm sound</string>
+    <string name="icloud_membership_unreadable_title">Reconnect your Apple account</string>
+    <string name="icloud_membership_unreadable_message">This app has a connection to your Apple account saved, but can no longer read it. The keys it needs are kept in this device\'s secure storage, and they cannot be recovered — so the connection has to be made again.
+
+Your tags and their location history are not affected, and nothing was removed from your Apple account.</string>
+    <string name="error_report_cause_membership_unreadable">The saved Apple account connection could not be decrypted, although its key is still present</string>
+    <string name="error_report_body_membership">The connection to your Apple account is stored on this device, the key that unlocks it is still here, and it no longer opens — which should not be possible.\n\nThat makes it worth reporting rather than just redoing. Your tags and their location history are not affected, and nothing was removed from your Apple account.</string>
+    <string name="debug_key_alignment">Key alignment</string>
+    <string name="debug_key_alignment_value">Index %1$d, aligned %2$s</string>
+    <string name="debug_key_alignment_none">None stored — the next fetch searches from the pairing date</string>
+    <string name="twofactor_apple_took_the_code">Apple accepted your code and then had a problem finishing the sign-in. The code is used up, so a new one is needed — waiting a moment before asking for it, because asking straight away is refused.</string>
+    <string name="twofactor_waiting_seconds">Asking Apple for a new code in %1$d s…</string>
+    <string name="twofactor_apple_did_not_recover">Apple is still not finishing the sign-in. This is a fault on Apple\'s side, not something you did, and not your code.\n\nTry again in a few minutes. Your password may be refused once when you do — that is part of the same fault, so enter it again rather than assuming it is wrong.</string>
+    <string name="login_failed_apple_declined">Apple refused the sign-in. This is Apple declining, not a problem with your Apple ID or password. Trying again shortly is worth doing, but if it keeps refusing please report it with a log rather than waiting it out.</string>
+    <string name="icloud_apple_declined_title">Apple is not answering right now</string>
+    <string name="icloud_apple_declined_body">Apple refused the request rather than failing to answer it. Nothing is wrong with your account, and nothing was changed. Try again shortly; if it keeps refusing, report it with a log.</string>
+    <string name="import_history">Import History</string>
+    <string name="history_import_complete_title">History import complete</string>
+    <string name="history_import_result_counts">Rows read: %1$d\nRows added: %2$d\nAlready present: %3$d\nMalformed: %4$d\nSkipped (tag not imported): %5$d</string>
+    <string name="history_import_unknown_guidance">Import the missing tags first, then import this history ZIP again to restore the skipped rows.</string>
+    <string name="history_import_legacy_title">History export is too old</string>
+    <string name="history_import_legacy_message">This export does not identify tags safely, so its history cannot be restored. Create a new Export History ZIP with the current app and import that file instead.</string>
+    <string name="history_import_invalid_title">History file not supported</string>
+    <string name="history_import_invalid_message">Choose an undamaged ZIP created by Export History in OpenTagViewer for Android.</string>
+    <string name="history_import_failed_title">History could not be imported</string>
+    <string name="history_import_failed_message">No history was imported. Try again, or choose another Export History ZIP.</string>
+    <string name="error_report_body_history_import">The app could not restore history from the file you picked, and cannot say why — so trying again with the same file may not help.
+
+No history was imported and nothing already stored was changed.</string>
+    <string name="login_export_logs">Export logs</string>
+    <string name="error_report_body_login">Signing in did not get through. The log below says which step failed and what came back, which is almost always the part that explains it.
+
+If Apple simply refused the request, waiting and trying again is worth doing first. If it keeps failing, a report with this log attached is what makes it fixable.</string>
+    <string name="login_failed_apple_asked_to_wait">Apple refused the sign-in and asked for %1$s before trying again. This is Apple declining, not a problem with your Apple ID or password.</string>
+    <string name="login_try_remote_anisette">Try a remote server</string>
+    <string name="login_failed_icloud_refused">Your password and code were accepted, and then Apple would not open iCloud for this account. This is not about terms of service. Other apps that sign in this way see it on Apple IDs that have never been used with an Apple device, and signing in at appleid.apple.com and completing the account details — adding a payment method, for instance — is what usually clears it. Waiting on its own generally does not.</string>
+    <string name="anisette_login_crashes_here">Apple\'s sign-in library crashes on this phone, so a server does this step instead. Everything else works normally. We don\'t know why it happens on some phones yet, and a report naming yours helps.</string>
+    <string name="anisette_report_crash">Report this phone</string>
+    <string name="anisette_crash_report_body">Apple\'s sign-in library crashes as soon as it loads on this phone. It works on most phones, and we do not know yet what the affected ones have in common.\n\nOpenTagViewer now uses a server for that step, so you can sign in and use the app normally. A report with the details below is what helps us find the cause.</string>
+    <string name="login_failed_refused_before_password">Apple refused to start signing in to this Apple ID before your password was checked, so retyping it will not help. Check that you can sign in at account.apple.com and whether Apple asks anything of you there. Trying a remote server presents Apple with a different device, which is worth a try. Apple said: %1$s</string>
+    <string name="extra_sources">Extra location sources (experimental)</string>
+    <string name="extra_sources_subtitle">Google Find Hub trackers</string>
+    <string name="extra_sources_explainer">Experimental. Locate the trackers in your Google account through your own googlefind service. They can be added as devices, or linked to a device so both networks\' reports show on one marker.</string>
+    <string name="google_find_hub" translatable="false">Google Find Hub</string>
+    <string name="google_find_hub_explainer">Reports of the trackers in your Google account, from a googlefind service. Fresh locations are requested only when you refresh a tag.</string>
+    <string name="server_url">Server address</string>
+    <string name="http_username">HTTP username (optional)</string>
+    <string name="http_password">HTTP password (optional)</string>
+    <string name="api_token">API token</string>
+    <string name="test_connection">Test connection</string>
+    <string name="test_google_ok">Google Find Hub: OK, %1$d trackers</string>
+    <string name="test_google_failed">Google Find Hub: %1$s</string>
+    <string name="test_nothing_configured">Enter a server address first</string>
+    <string name="keys_file_invalid">This is not a .keys file with a private key</string>
+    <string name="openhaystack_default_name">OpenHaystack tag</string>
+    <string name="add_openhaystack_key">Add OpenHaystack key (.keys)</string>
+    <string name="add_from_google">Add from Google Find Hub (experimental)</string>
+    <string name="link_google_tracker">Link Google tracker (experimental)</string>
+    <string name="google_link_saved">Google tracker link saved</string>
+    <string name="google_not_configured">Set up Google Find Hub in Settings → Extra location sources first</string>
+    <string name="google_tracker_none">None</string>
+    <string name="google_list_failed">Could not load Google trackers: %1$s</string>
+    <string name="add">Add</string>
+    <string name="device_added">Device added</string>
+    <string name="device_add_failed">The device could not be added</string>
+    <string name="source_google" translatable="false">Google</string>
+    <string name="google_find_hub_tracker">Google Find Hub tracker</string>
+    <string name="nearby_now_with_signal">Nearby (%1$s)</string>
+    <string name="ring_failed_reason">Ring failed: %1$s</string>
+    <string name="server_url_not_https">Not https: the API token will be sent unencrypted.</string>
+    <string name="google_find_hub_setup_guide">How to set this up</string>
+</resources>

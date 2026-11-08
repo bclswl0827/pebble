@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item
+        android:id="@+id/device_location_history"
+        android:title="@string/location_history" />
+
+    <item
+        android:id="@+id/device_play_sound_nearby"
+        android:title="@string/play_sound_nearby" />
+
+    <!-- Hidden for Google trackers, see DeviceInfoActivity -->
+    <item
+        android:id="@+id/device_link_google"
+        android:title="@string/link_google_tracker" />
+    <item
+        android:id="@+id/device_delete"
+        android:title="@string/remove_device" />
+
+</menu>

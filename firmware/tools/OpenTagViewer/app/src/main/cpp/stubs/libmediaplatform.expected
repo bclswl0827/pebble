@@ -1,0 +1,19 @@
+# Stubbed symbols that ADI is known to call, and that are known to be harmless.
+#
+# These are the difference between an alarm worth reading and one people learn to ignore.
+# Anything in this file logs at INFO and is not counted as a reason to distrust the session;
+# anything NOT in this file logs at ERROR, because it means Apple's implementation started
+# depending on something we only pretend to provide.
+#
+# Add to this list only with evidence - a passing end-to-end provisioning run with the call
+# observed - never because a log line was annoying.
+
+# Nothing is listed here now.
+#
+# makeWorkQueue used to be: called from a static constructor while dlopen'ing
+# libstoreservicescore.so, and believed harmless because "our stub returns NULL". It did not. It
+# returns a std::shared_ptr by value, through a buffer the caller provides, and the generated stub
+# never wrote that buffer - so the constructor read a leftover stack value as a control block and
+# incremented through it. That was issue #232. It is written by hand in
+# libmediaplatform_handwritten.cpp now, and the lesson for this file is that "provisioning still
+# worked" established nothing about what a stub leaves behind for its caller.

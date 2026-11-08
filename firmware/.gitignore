@@ -1,0 +1,10 @@
+# PlatformIO, editor metadata, and Python cache.
+/.pio/
+/.vscode/
+/.piopm
+/platforms/da14531/.piopm
+__pycache__/
+*.pyc
+
+# Local debugger output.
+/*.log

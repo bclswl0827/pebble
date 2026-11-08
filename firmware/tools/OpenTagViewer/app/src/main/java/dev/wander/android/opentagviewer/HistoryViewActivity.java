@@ -1,0 +1,824 @@
+package dev.wander.android.opentagviewer;
+
+import static android.view.View.GONE;
+import static android.view.View.VISIBLE;
+import static android.view.ViewGroup.LayoutParams.MATCH_PARENT;
+
+import static com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_EXPANDED;
+import static com.google.android.material.bottomsheet.BottomSheetBehavior.STATE_HALF_EXPANDED;
+
+import android.annotation.SuppressLint;
+import android.content.Intent;
+import android.os.Bundle;
+import android.text.format.DateFormat;
+import android.util.Log;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import androidx.annotation.NonNull;
+import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.databinding.DataBindingUtil;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
+
+import com.google.android.gms.maps.CameraUpdateFactory;
+import com.google.android.gms.maps.GoogleMap;
+import com.google.android.gms.maps.OnMapReadyCallback;
+import com.google.android.gms.maps.SupportMapFragment;
+import com.google.android.gms.maps.model.LatLng;
+import com.google.android.gms.maps.model.LatLngBounds;
+import com.google.android.gms.maps.model.MapStyleOptions;
+import com.google.android.gms.maps.model.Marker;
+import com.google.android.gms.maps.model.MarkerOptions;
+import com.google.android.gms.maps.model.Polyline;
+import com.google.android.gms.maps.model.PolylineOptions;
+
+import dev.wander.android.opentagviewer.ui.maps.IMapProvider;
+import dev.wander.android.opentagviewer.ui.maps.MapProviderFactory;
+import dev.wander.android.opentagviewer.ui.maps.MapMarker;
+import dev.wander.android.opentagviewer.ui.maps.MapPolyline;
+import dev.wander.android.opentagviewer.ui.maps.GoogleMapProvider;
+import dev.wander.android.opentagviewer.ui.maps.AMapProvider;
+import com.google.android.material.bottomsheet.BottomSheetBehavior;
+import com.google.android.material.button.MaterialButton;
+import com.google.android.material.datepicker.CalendarConstraints;
+import com.google.android.material.datepicker.CompositeDateValidator;
+import com.google.android.material.datepicker.DateValidatorPointBackward;
+import com.google.android.material.datepicker.DateValidatorPointForward;
+import com.google.android.material.datepicker.MaterialDatePicker;
+import com.google.android.material.progressindicator.LinearProgressIndicator;
+
+import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.TimeZone;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+
+import dev.wander.android.opentagviewer.data.model.BeaconInformation;
+import dev.wander.android.opentagviewer.data.model.BeaconLocationReport;
+import dev.wander.android.opentagviewer.databinding.ActivityHistoryViewBinding;
+import dev.wander.android.opentagviewer.db.datastore.UserSettingsDataStore;
+import dev.wander.android.opentagviewer.db.repo.BeaconRepository;
+import dev.wander.android.opentagviewer.db.repo.UserSettingsRepository;
+import dev.wander.android.opentagviewer.db.repo.model.UserSettings;
+import dev.wander.android.opentagviewer.db.room.OpenTagViewerDatabase;
+import dev.wander.android.opentagviewer.db.room.entity.DailyHistoryFetchRecord;
+import dev.wander.android.opentagviewer.db.util.BeaconCombinerUtil;
+import dev.wander.android.opentagviewer.source.ReportSources;
+import dev.wander.android.opentagviewer.python.AppDependencies;
+import dev.wander.android.opentagviewer.python.PythonAppleService;
+import dev.wander.android.opentagviewer.ui.compat.WindowPaddingUtil;
+import dev.wander.android.opentagviewer.ui.history.HistoryItemsAdapter;
+import dev.wander.android.opentagviewer.util.android.AddressLookup;
+import dev.wander.android.opentagviewer.util.parse.BeaconDataParser;
+import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers;
+import io.reactivex.rxjava3.core.Completable;
+import io.reactivex.rxjava3.core.Observable;
+import io.reactivex.rxjava3.schedulers.Schedulers;
+import lombok.Synchronized;
+
+public class HistoryViewActivity extends AppCompatActivity implements IMapProvider.OnMapReadyCallback {
+    private static final String TAG = HistoryViewActivity.class.getSimpleName();
+
+    private static final float HISTORY_SHEET_HALF_EXPANDED_RATIO = 0.4f;
+    private static final float LINE_WIDTH = 16f;
+    private static final float OUTLINE_WIDTH = 22f;
+    private static final int FOCUS_PADDING = 120;
+
+    private static final float SINGLE_MARKER_ZOOM = 18.0f;
+
+    private static final long DAY_IN_MS = 1000 * 60 * 60 * 24;
+
+    private static final long SEVEN_DAYS_IN_MS = DAY_IN_MS * 7;
+
+    private IMapProvider mapProvider;
+    private GoogleMap map; // 保留用于向后兼容
+
+    private BeaconRepository beaconRepo;
+    private UserSettingsRepository userSettingsRepo;
+    private PythonAppleService appleService;
+
+    private AddressLookup geocoder = null;
+
+    private UserSettings userSettings;
+
+    private String beaconId;
+
+    private double defaultLatitude;
+    private double defaultLongitude;
+    private float defaultZoom;
+
+    private BeaconInformation beaconInformation;
+
+    private final List<BeaconLocationReport> locations = new ArrayList<>();
+
+    private final Set<Integer> selectedItems = new HashSet<>();
+
+    private HistoryItemsAdapter historyItemsAdapter;
+
+    private int daysBack = 0;
+    private long currentBeginningOfDay = -1;
+
+    private String currentHistoryLineOutlineId = null;
+    private String currentHistoryLineId = null;
+    private String singleCoordMarkerId = null;
+
+    private Button moveLeftButton;
+    private Button moveRightButton;
+    private Button datePickerButton;
+
+    private boolean overrideMapPadding = false;
+
+    private BottomSheetBehavior<View> bottomSheetBehavior;
+
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        final Intent intent = getIntent();
+        this.beaconId = getIntent().getStringExtra("beaconId");
+        Log.d(TAG, "Showing history view for beaconId=" + this.beaconId);
+
+        this.defaultLatitude = intent.getDoubleExtra("lat", 0.0f);
+        this.defaultLongitude = intent.getDoubleExtra("lon", 0.0f);
+        this.defaultZoom = intent.getFloatExtra("zoom", 16.0f);
+
+        this.beaconRepo = new BeaconRepository(
+                OpenTagViewerDatabase.getInstance(getApplicationContext()));
+
+        this.userSettingsRepo = new UserSettingsRepository(
+                UserSettingsDataStore.getInstance(this.getApplicationContext()));
+
+        this.appleService = PythonAppleService.getInstance();
+
+        this.geocoder = AppDependencies.geocoder(
+                this.getApplicationContext(), Locale.getDefault());
+
+        this.userSettings = this.userSettingsRepo.getUserSettings();
+
+        this.beaconInformation = this.beaconRepo.getById(this.beaconId)
+                .flatMap(data -> BeaconDataParser.parseAsync(List.of(data)))
+                .map(items -> items.get(0))
+                .blockingFirst();
+
+        ActivityHistoryViewBinding binding = DataBindingUtil.setContentView(this, R.layout.activity_history_view);
+
+        binding.setHandleClickBack(this::finish);
+        binding.setPageTitle(this.getCurrentBeaconName());
+
+        if (this.getSupportActionBar() != null) {
+            this.getSupportActionBar().hide();
+        }
+
+        ViewGroup content = this.findViewById(R.id.history_bottomsheet_coordinator_layout);
+        content.addView(getLayoutInflater().inflate(R.layout.view_history_bottom_sheet, content, false));
+        this.setupBottomSheet();
+
+        this.historyItemsAdapter = new HistoryItemsAdapter(
+                this.getResources(),
+                this.geocoder,
+                this.locations,
+                this.userSettings,
+                this.selectedItems,
+                this::handleOnClickHistoryListItem
+        );
+        RecyclerView recyclerView = findViewById(R.id.recycler_view_history_items);
+
+        // **The bottom inset goes on the list, not on the root.** Padding the root shortens the
+        // coordinator inside it, so the sheet stopped above the navigation bar and the white
+        // activity background showed through beneath a grey sheet - with the last history row
+        // clipped by the same gap. Paired call, so the bottom cannot be left out: see
+        // WindowPaddingUtil.
+        WindowPaddingUtil.insetForSystemBars(binding.getRoot(), recyclerView);
+
+        recyclerView.setLayoutManager(new LinearLayoutManager(this));
+        recyclerView.setAdapter(this.historyItemsAdapter);
+        recyclerView.setItemAnimator(null);
+
+        // Obtain the SupportMapFragment and get notified when the map is ready to be used.
+        // 根据用户设置创建地图提供商
+        String mapProviderType = this.userSettings.getMapProvider();
+        this.mapProvider = MapProviderFactory.create(MapProviderFactory.effectiveProvider(this, mapProviderType));
+        
+        // 初始化地图
+        this.mapProvider.initialize(this, R.id.history_map, this);
+    }
+
+    @Override
+    public void onMapReady(IMapProvider provider) {
+        this.mapProvider = provider;
+
+        // 如果是Google Maps，保留向后兼容
+        if (provider instanceof GoogleMapProvider) {
+            this.map = ((GoogleMapProvider) provider).getGoogleMap();
+        }
+
+        mapProvider.setMapStyle(this.getPreferredMapStyle());
+
+        // move to same position that we left when we went to the history page from the main page
+        this.mapProvider.moveCamera(this.defaultLatitude, this.defaultLongitude, this.defaultZoom);
+
+        this.fetchAndUpdateDataForCurrentDay();
+    }
+    
+    @Override
+    protected void onResume() {
+        super.onResume();
+        this.userSettings = this.userSettingsRepo.getUserSettings();
+        if (this.mapProvider != null) {
+            this.mapProvider.setMapStyle(this.getPreferredMapStyle());
+        }
+        if (this.mapProvider instanceof AMapProvider) {
+            ((AMapProvider) this.mapProvider).onResume();
+        }
+    }
+    
+    @Override
+    protected void onPause() {
+        super.onPause();
+        if (this.mapProvider instanceof AMapProvider) {
+            ((AMapProvider) this.mapProvider).onPause();
+        }
+    }
+    
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (this.mapProvider instanceof AMapProvider) {
+            ((AMapProvider) this.mapProvider).onDestroy();
+        }
+    }
+
+    private IMapProvider.MapStyle getPreferredMapStyle() {
+        if (this.userSettings == null || this.userSettings.getUseDarkTheme() == null) {
+            return IMapProvider.MapStyle.FOLLOW_SYSTEM;
+        }
+        return this.userSettings.getUseDarkTheme()
+                ? IMapProvider.MapStyle.DARK
+                : IMapProvider.MapStyle.LIGHT;
+    }
+
+    private void fetchAndUpdateDataForCurrentDay() {
+        moveLeftButton.setClickable(false); // temp disable
+        moveRightButton.setClickable(false); // temp disable
+        datePickerButton.setClickable(false); // temp disable
+
+        final LinearLayout dataReportContainer = this.findViewById(R.id.history_data_overview_top);
+        final LinearLayout errorMessageContainer = this.findViewById(R.id.history_error_message);
+
+        final LinearProgressIndicator historyLoadingProgress = this.findViewById(R.id.history_loading_progress_indicator);
+
+        final long now = System.currentTimeMillis();
+
+        final long nowWithDaysBack = now - (this.daysBack * DAY_IN_MS);
+        // We are using this thing to solve the missing API version support: https://developer.android.com/studio/write/java8-support#library-desugaring
+        @SuppressLint("NewApi") final long beginningOfDay = Instant.ofEpochMilli(nowWithDaysBack).atZone(ZoneId.systemDefault()).toLocalDate().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli();
+
+        this.currentBeginningOfDay = beginningOfDay;
+
+        if (!this.hasReportsForDayLocally(beginningOfDay)) {
+            // show if we will be loading for a bit.
+            // if it is available locally, then don't show because it will update very quickly!
+            historyLoadingProgress.show();
+        }
+
+        // fetch & do
+        var async = this.getReportsForDay(beginningOfDay)
+                .observeOn(AndroidSchedulers.mainThread())
+                .subscribe(items -> {
+                        historyLoadingProgress.hide();
+
+                        this.setRetryButtonLoading(true);
+                        dataReportContainer.setVisibility(VISIBLE);
+                        errorMessageContainer.setVisibility(GONE);
+
+                        moveLeftButton.setClickable(true);
+                        datePickerButton.setClickable(true);
+                        if (moveRightButton.isEnabled()) moveRightButton.setClickable(true); // allow navigation
+
+                        this.updateForNewLocationsList(items);
+                    },
+                    error -> {
+                        Log.e(TAG, "Failure to fetch location reports in time range: " + beginningOfDay + " - " + (beginningOfDay + DAY_IN_MS), error);
+                        historyLoadingProgress.hide();
+
+                        this.setRetryButtonLoading(true);
+                        dataReportContainer.setVisibility(GONE);
+                        errorMessageContainer.setVisibility(VISIBLE);
+
+                        moveLeftButton.setClickable(true);
+                        datePickerButton.setClickable(true);
+                        if (moveRightButton.isEnabled()) moveRightButton.setClickable(true); // allow navigation
+                    });
+    }
+
+    private static final Map<String, List<BeaconLocationReport>> MEMORY_REPORTS_CACHE = new ConcurrentHashMap<>();
+
+    private static String createReportsForDayCacheKey(final String beaconId, final long beginningOfDay) {
+        return String.format(Locale.ROOT, "%d-%s", beginningOfDay, beaconId);
+    }
+
+    private boolean hasReportsForDayLocally(final long beginningOfDay) {
+        final String cacheKey = createReportsForDayCacheKey(beaconId, beginningOfDay);
+        return MEMORY_REPORTS_CACHE.containsKey(cacheKey);
+    }
+
+    private Observable<List<BeaconLocationReport>> getReportsForDay(final long beginningOfDay) {
+        final String cacheKey = createReportsForDayCacheKey(beaconId, beginningOfDay);
+        final long endOfDay = beginningOfDay + DAY_IN_MS;
+
+        if (MEMORY_REPORTS_CACHE.containsKey(cacheKey)) {
+            // retrieve from cache if fetched in the past already
+            Log.d(TAG, "Returned location data for beaconId=" + beaconId + " from cache for time range: " + beginningOfDay + "-" + endOfDay);
+            return Observable.just(Objects.requireNonNull(MEMORY_REPORTS_CACHE.get(cacheKey)));
+        }
+
+        // retrieve strictly from localDB if available there?
+        return this.beaconRepo.getInsertionHistoryItem(beaconId, beginningOfDay)
+                .flatMap(cacheEntry -> {
+                    if (cacheEntry.isPresent()) {
+                        // fetch entirely from local cache
+                        Log.d(TAG, "Attempting to fetch 24 day history entirely from localDB as DB reported offset is present for beaconId=" + beaconId);
+                        return this.fetchReportsLocally(beginningOfDay, endOfDay, cacheKey);
+                    } else {
+                        // otherwise actually attempt to fetch remotely
+                        Log.d(TAG, "Going to fetch 24 hour location history remotely for beaconId=" + beaconId);
+                        return this.fetchReports(beginningOfDay, endOfDay, cacheKey);
+                    }
+                });
+    }
+
+    private Observable<List<BeaconLocationReport>> fetchReportsLocally(final long beginningOfDay, final long endOfDay, final String cacheKey) {
+        final boolean isForToday = this.daysBack == 0;
+
+        return this.beaconRepo.getLocationsFor(beaconId, beginningOfDay, endOfDay)
+                .doOnNext(locations -> {
+                    // Don't cache the current day (it could still update)!
+                    if (!isForToday) {
+                        MEMORY_REPORTS_CACHE.put(cacheKey, locations);
+                    }
+                });
+    }
+
+    private Observable<List<BeaconLocationReport>> fetchReports(final long beginningOfDay, final long endOfDay, final String cacheKey) {
+        final boolean isForToday = this.daysBack == 0;
+
+        // Not Map.of: a self-generated tag has no plist, and Map.of throws on a null value -
+        // which crashed this screen the moment one was opened.
+        var reqData = BeaconRepository.plistFallback(
+                this.beaconId, this.beaconInformation.getOwnedBeaconPlistRaw());
+        // asyncReq emits Observable<FetchResult> (reports + updated accessory state per beacon)
+        // Each device through its own sources: the Apple account and Google Find Hub - see
+        // ReportSources.
+        var asyncReq = this.beaconRepo.toAccessoryRequests(reqData)
+                .flatMap(requests -> Observable.fromIterable(requests)
+                        .concatMap(request -> ReportSources.create(this).fetch(
+                                request, beginningOfDay, endOfDay, false,
+                                this.appleService == null ? null
+                                        : this.appleService.getReportsBetween(List.of(request), beginningOfDay, endOfDay))));
+
+        // **What Apple returns is merged with what we already hold, for every day.**
+        //
+        // This used to merge only for days older than a week, on the reasoning that Apple stops
+        // serving history beyond seven days so the local copy is the only source there. True,
+        // and it left the far more common case wrong: inside the week the screen took the
+        // remote answer alone and discarded rows already in the database.
+        //
+        // Those rows are not stale duplicates - they are reports this app fetched and stored,
+        // often minutes earlier from the map. Apple returning nothing for a window is ordinary:
+        // reports age out, and a narrow key window covers less than the day being asked for. So
+        // a tag the map had just located showed an empty history, and going back a day and
+        // returning made reports appear - which is exactly the behaviour that got reported.
+        //
+        // Merging always is strictly better: the remote answer is still authoritative and still
+        // stored, combineAndSort de-duplicates by report, and the only difference is that
+        // reports the app already had stop being thrown away.
+        var asyncDB = this.beaconRepo.getLocationsFor(beaconId, beginningOfDay, endOfDay);
+
+        Log.d(TAG, "Going to perform a merged localdb + remote fetch for beaconId=" + beaconId
+                + " location data in range: " + beginningOfDay + "-" + endOfDay);
+
+        return Observable.zip(
+                        asyncReq.flatMap(this.beaconRepo::storeFetchResult)
+                                .map(locations -> locations.get(beaconId)),
+                        asyncDB,
+                        (locationsRemote, locationsLocal) -> {
+                            Log.d(TAG, "Got " + locationsRemote.size() + " locations from Apple"
+                                    + " server and got " + locationsLocal.size() + " locations"
+                                    + " from local DB for beaconId" + beaconId);
+
+                            // **Stored in full, shown for this day only.**
+                            //
+                            // The fetch above searches key indices rather than a clock range,
+                            // so Apple hands back sightings either side of the day asked for.
+                            // Those are kept and stored - they cost the same to find and would
+                            // otherwise be fetched again when the user steps to the next day -
+                            // but they must not be drawn on this one. The local half needs no
+                            // such filter: it comes from a day-bounded query.
+                            var remoteForThisDay = locationsRemote.stream()
+                                    .filter(report -> report.getTimestamp() >= beginningOfDay
+                                            && report.getTimestamp() < endOfDay)
+                                    .collect(Collectors.toList());
+
+                            var mergedList = BeaconCombinerUtil.combineAndSort(
+                                    beaconId, remoteForThisDay, locationsLocal);
+                            Log.d(TAG, "Final merged location history list has "
+                                    + mergedList.size() + " items!");
+
+                            return mergedList;
+                        })
+                .doOnNext(locations -> {
+                    // Don't cache the current day (it could still update)!
+                    if (!isForToday) {
+                        MEMORY_REPORTS_CACHE.put(cacheKey, locations);
+                    }
+                })
+                .flatMap(locations -> this.storeLocationFetchToLocalDb(
+                        isForToday, beaconId, beginningOfDay).andThen(Observable.just(locations)))
+                .subscribeOn(Schedulers.computation());
+    }
+
+    private Completable storeLocationFetchToLocalDb(final boolean isForToday, final String beaconId, final long startTime) {
+        if (!isForToday) {
+            // store in cache local DB too for easier access on restarts
+            return this.beaconRepo.storeHistoryRecords(DailyHistoryFetchRecord.builder()
+                    .dayStartTime(startTime)
+                    .beaconId(beaconId)
+                    .build()).ignoreElements();
+        }
+        return Completable.complete();
+    }
+
+    private synchronized void updateForNewLocationsList(final List<BeaconLocationReport> newReports) {
+        final int oldNumItems = this.locations.size();
+        if (oldNumItems > 0) {
+            // cleanup old items
+            this.locations.clear();
+            this.selectedItems.clear();
+            this.historyItemsAdapter.notifyItemRangeRemoved(0, oldNumItems);
+        }
+
+        this.cleanupOldLines();
+
+        TextView currentRangeText = this.findViewById(R.id.history_drawer_title);
+
+        if (this.daysBack == 0) {
+            currentRangeText.setText(R.string.today);
+            moveRightButton.setEnabled(false);
+        } else if (this.daysBack == 1) {
+            currentRangeText.setText(R.string.yesterday);
+            moveRightButton.setEnabled(true);
+        } else {
+            var format = DateFormat.getBestDateTimePattern(Locale.getDefault(), "EEE, dd MMM yyyy");
+            var timestampFormat = new SimpleDateFormat(format, Locale.getDefault());
+            currentRangeText.setText(timestampFormat.format(new Date(this.currentBeginningOfDay)));
+            moveRightButton.setEnabled(true);
+        }
+
+        this.drawNewLocationList(newReports);
+    }
+
+    private void cleanupOldLines() {
+        if (this.mapProvider == null) return;
+        
+        if (this.currentHistoryLineId != null) {
+            this.mapProvider.removePolyline(this.currentHistoryLineId);
+            this.currentHistoryLineId = null;
+        }
+        if (this.currentHistoryLineOutlineId != null) {
+            this.mapProvider.removePolyline(this.currentHistoryLineOutlineId);
+            this.currentHistoryLineOutlineId = null;
+        }
+        if (this.singleCoordMarkerId != null) {
+            this.mapProvider.removeMarker(this.singleCoordMarkerId);
+            this.singleCoordMarkerId = null;
+        }
+    }
+
+    private void setupBottomSheet() {
+        this.moveLeftButton = this.findViewById(R.id.history_move_left_button);
+        this.moveRightButton = this.findViewById(R.id.history_move_right_button);
+        this.datePickerButton = this.findViewById(R.id.history_day_picker_button);
+
+        View bottomSheetChildView = this.findViewById(R.id.view_history_bottom_sheet_layout);
+        ViewGroup.LayoutParams params = bottomSheetChildView.getLayoutParams();
+        bottomSheetBehavior = BottomSheetBehavior.from(bottomSheetChildView);
+        if (params != null) {
+            params.height = MATCH_PARENT;
+            bottomSheetChildView.setLayoutParams(params);
+            bottomSheetBehavior.setFitToContents(false);
+            bottomSheetBehavior.setHalfExpandedRatio(HISTORY_SHEET_HALF_EXPANDED_RATIO);
+        }
+
+        bottomSheetBehavior.addBottomSheetCallback(new BottomSheetBehavior.BottomSheetCallback() {
+            @Override
+            public void onStateChanged(@NonNull View bottomSheet, int newState) {
+                if (mapProvider == null) return;
+                if (overrideMapPadding) return;
+
+                if (bottomSheetBehavior.getState() == STATE_EXPANDED) {
+                    // when fully expanded then pretend it's not expanded for now
+                    // so that when the user unexpands they will see things in a more centred way
+                    int height = bottomSheet.getHeight();
+                    int offset = (int)((height - bottomSheetBehavior.getPeekHeight()) * bottomSheetBehavior.getHalfExpandedRatio()) + bottomSheetBehavior.getPeekHeight();
+                    mapProvider.setPadding(0, 0, 0, offset);
+                }
+            }
+
+            @Override
+            public void onSlide(@NonNull View bottomSheet, float slideOffset) {
+                if (mapProvider == null) return;
+                if (overrideMapPadding) return;
+
+                int height = bottomSheet.getHeight();
+                int offset = (int)((height - bottomSheetBehavior.getPeekHeight()) * slideOffset) + bottomSheetBehavior.getPeekHeight();
+
+                mapProvider.setPadding(0, 0, 0, offset);
+            }
+        });
+
+        // setup menu buttons
+
+        moveLeftButton.setOnClickListener(v -> {
+            this.daysBack++;
+            moveRightButton.setEnabled(this.daysBack > 0);
+            this.fetchAndUpdateDataForCurrentDay();
+        });
+        moveRightButton.setOnClickListener(v -> {
+            moveRightButton.setEnabled(this.daysBack > 0);
+            this.daysBack--;
+            this.fetchAndUpdateDataForCurrentDay();
+        });
+        datePickerButton.setOnClickListener(v -> this.showDatePicker());
+
+        final MaterialButton retryButton = this.findViewById(R.id.history_fetch_retry_button);
+        retryButton.setOnClickListener(v -> this.handleRetryHistoryFetch());
+
+        final LinearProgressIndicator historyLoadingProgress = this.findViewById(R.id.history_loading_progress_indicator);
+        historyLoadingProgress.hide();
+    }
+
+    private void showDatePicker() {
+        Calendar calendar = getClearedUtc();
+        final long today = MaterialDatePicker.todayInUtcMilliseconds();
+
+        calendar.setTimeInMillis(today);
+        calendar.add(Calendar.DAY_OF_MONTH, -this.daysBack);
+        final long currentSelectedDay = calendar.getTimeInMillis();
+
+        calendar.setTimeInMillis(today);
+        calendar.add(Calendar.YEAR, -2);
+        final long twoYearsAgo = calendar.getTimeInMillis();
+
+        MaterialDatePicker.Builder<Long> builder = MaterialDatePicker.Builder.datePicker()
+                .setSelection(currentSelectedDay)
+                .setInputMode(MaterialDatePicker.INPUT_MODE_CALENDAR);
+
+        Calendar lowerBoundCalendar = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+        lowerBoundCalendar.add(Calendar.YEAR, -2);
+        long lowerBound = lowerBoundCalendar.getTimeInMillis();
+
+        var constraintBuilder = new CalendarConstraints.Builder()
+                .setStart(twoYearsAgo)
+                .setEnd(today)
+                .setValidator(CompositeDateValidator.allOf(List.of(
+                        DateValidatorPointForward.from(lowerBound),
+                        DateValidatorPointBackward.now()
+                )))
+                .setOpenAt(currentSelectedDay);
+
+        try {
+            builder.setCalendarConstraints(constraintBuilder.build());
+            MaterialDatePicker<Long> picker = builder.build();
+            picker.addOnPositiveButtonClickListener(selection -> {
+                Log.d(TAG, "User selected new date: " + selection);
+
+                final int daysDifference = (int) TimeUnit.DAYS.convert(today - selection, TimeUnit.MILLISECONDS);
+                this.handleUserPickedNewStartOfDay(daysDifference);
+            });
+
+            picker.show(this.getSupportFragmentManager(), picker.toString());
+        } catch (IllegalArgumentException e) {
+            Toast.makeText(this, "Error while showing date picker!", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void handleUserPickedNewStartOfDay(final int daysDifference) {
+        this.daysBack = daysDifference;
+        this.moveRightButton.setEnabled(this.daysBack > 0);
+        this.fetchAndUpdateDataForCurrentDay();
+    }
+
+    private static Calendar getClearedUtc() {
+        Calendar utc = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+        utc.clear();
+        return utc;
+    }
+
+    private void handleRetryHistoryFetch() {
+        this.setRetryButtonLoading(false);
+        this.fetchAndUpdateDataForCurrentDay();
+    }
+
+    private void setRetryButtonLoading(boolean isComplete) {
+        final MaterialButton retryButton = this.findViewById(R.id.history_fetch_retry_button);
+        retryButton.setClickable(isComplete); // temporarily disable
+    }
+
+    private String getCurrentBeaconName() {
+        if (this.beaconInformation.isEmojiFilled()) {
+            return String.format("%s %s", this.beaconInformation.getEmoji(), this.beaconInformation.getName());
+        }
+        if (this.beaconInformation.getName() != null && !this.beaconInformation.getName().isBlank()) {
+            return this.beaconInformation.getName();
+        }
+        return this.beaconInformation.getBeaconId();
+    }
+
+    @Synchronized
+    private void drawNewLocationList(List<BeaconLocationReport> reports) {
+        this.locations.addAll(reports);
+
+        // Update # of datapoints text
+        TextView numberOfDatapoints = this.findViewById(R.id.history_datapoints_text);
+        numberOfDatapoints.setText(this.getString(R.string.x_data_points, this.locations.size()));
+
+        // notify that list of items has been inserted
+        this.historyItemsAdapter.notifyItemRangeInserted(0, this.locations.size());
+
+        // draw datapoints on map
+        var coords = this.locations.stream()
+                .map(rep -> new MapPolyline.LatLng(rep.getLatitude(), rep.getLongitude()))
+                .collect(Collectors.toList());
+
+        this.drawNewLines(coords);
+
+        if (!coords.isEmpty()) {
+            if (coords.size() == 1) {
+                MapPolyline.LatLng coord = coords.get(0);
+                this.animateCameraToPos(coord.getLatitude(), coord.getLongitude(), SINGLE_MARKER_ZOOM, null);
+            } else {
+                var bounds = this.determineBoundsForCurrent();
+                this.animateCameraToBoundingBox(bounds, FOCUS_PADDING);
+            }
+        }
+    }
+
+    private LatLngBounds determineBoundsForCurrent() {
+        Double latMax = null;
+        Double latMin = null;
+        Double lonMax = null;
+        Double lonMin = null;
+
+        for (var coord : this.locations) {
+            if (latMax == null || latMax < coord.getLatitude()) latMax = coord.getLatitude();
+            if (latMin == null || latMin > coord.getLatitude()) latMin = coord.getLatitude();
+            if (lonMax == null || lonMax < coord.getLongitude()) lonMax = coord.getLongitude();
+            if (lonMin == null || lonMin > coord.getLongitude()) lonMin = coord.getLongitude();
+        }
+
+        if (latMax == null) {
+            return null;
+        }
+
+        return new LatLngBounds(
+                new LatLng(latMin, lonMin),
+                new LatLng(latMax, lonMax)
+        );
+    }
+
+    private void drawNewLines(final List<MapPolyline.LatLng> coords) {
+        if (this.mapProvider == null) {
+            Log.w(TAG, "Map provider is not ready yet, cannot draw lines");
+            return;
+        }
+        
+        final int numCoords = coords.size();
+        if (numCoords > 1) {
+            // 清除旧的路径线
+            this.cleanupOldLines();
+            
+            // 添加轮廓线
+            MapPolyline outlineLine = MapPolyline.builder()
+                    .points(coords)
+                    .id("history_line_outline")
+                    .color(this.getColor(R.color.maps_line_outline))
+                    .width(OUTLINE_WIDTH)
+                    .build();
+            this.currentHistoryLineOutlineId = this.mapProvider.addPolyline(outlineLine);
+
+            // 添加主路径线
+            MapPolyline primaryLine = MapPolyline.builder()
+                    .points(coords)
+                    .id("history_line_primary")
+                    .color(this.getColor(R.color.maps_line_primary))
+                    .width(LINE_WIDTH)
+                    .build();
+            this.currentHistoryLineId = this.mapProvider.addPolyline(primaryLine);
+        } else if (numCoords == 1) {
+            // if we just had a single item, then draw a single marker
+            MapPolyline.LatLng coord = coords.get(0);
+            MapMarker marker = MapMarker.builder()
+                    .id("single_coord_marker")
+                    .latitude(coord.getLatitude())
+                    .longitude(coord.getLongitude())
+                    .useDefaultIcon(true)
+                    .build();
+            this.singleCoordMarkerId = this.mapProvider.addMarker(marker);
+        }
+    }
+
+    private void handleOnClickHistoryListItem(final HistoryItemsAdapter.ClickedItemInfo clickedReportAndLocationName) {
+        final BeaconLocationReport clickedReport = clickedReportAndLocationName.getBeaconLocationReport();
+        final String locationName = clickedReportAndLocationName.getGeocodedLocationName();
+        final int index = clickedReportAndLocationName.getIndex();
+
+        // update left-side icon in UI
+        for (var oldIndex : this.selectedItems) {
+            this.historyItemsAdapter.notifyItemChanged(oldIndex);
+        }
+        this.selectedItems.clear();
+        this.selectedItems.add(index);
+        this.historyItemsAdapter.notifyItemChanged(index);
+
+
+        if (this.locations.size() <= 1) {
+            Log.d(TAG, "Can't draw single coord marker when <= 1 items! Skipping...");
+            return;
+        }
+
+        // remove current
+        if (this.singleCoordMarkerId != null && this.mapProvider != null) {
+            this.mapProvider.removeMarker(this.singleCoordMarkerId);
+        }
+
+        final boolean sheetIsFullyExpanded = bottomSheetBehavior.getState() == STATE_EXPANDED;
+
+        // replace with new
+        if (this.mapProvider != null) {
+            MapMarker marker = MapMarker.builder()
+                    .id("single_coord_marker")
+                    .latitude(clickedReport.getLatitude())
+                    .longitude(clickedReport.getLongitude())
+                    .title(locationName)
+                    .useDefaultIcon(true)
+                    .build();
+            this.singleCoordMarkerId = this.mapProvider.addMarker(marker);
+
+            if (sheetIsFullyExpanded) {
+                this.overrideMapPadding = true;
+                this.mapProvider.setPadding(0, 0, 0, bottomSheetBehavior.getPeekHeight());
+                this.animateCameraToPos(clickedReport.getLatitude(), clickedReport.getLongitude(), SINGLE_MARKER_ZOOM, () -> {
+                    Log.d(TAG, "Undoing overrideMapPadding override!");
+                    this.overrideMapPadding = false;
+                });
+                bottomSheetBehavior.setState(STATE_HALF_EXPANDED);
+            } else {
+                this.animateCameraToPos(clickedReport.getLatitude(), clickedReport.getLongitude(), SINGLE_MARKER_ZOOM, null);
+            }
+        }
+    }
+
+    private void animateCameraToBoundingBox(final LatLngBounds bounds, int padding) {
+        if (this.mapProvider == null || bounds == null) return;
+        
+        // 将LatLngBounds转换为点列表
+        List<MapPolyline.LatLng> points = new ArrayList<>();
+        points.add(new MapPolyline.LatLng(bounds.southwest.latitude, bounds.southwest.longitude));
+        points.add(new MapPolyline.LatLng(bounds.northeast.latitude, bounds.northeast.longitude));
+        
+        // 使用GoogleMapProvider的特殊方法（如果可用）
+        if (this.mapProvider instanceof GoogleMapProvider) {
+            ((GoogleMapProvider) this.mapProvider).animateCameraToBounds(points, padding);
+        } else {
+            // 对于其他提供商，计算中心点和缩放级别
+            double centerLat = (bounds.southwest.latitude + bounds.northeast.latitude) / 2.0;
+            double centerLon = (bounds.southwest.longitude + bounds.northeast.longitude) / 2.0;
+            this.mapProvider.animateCamera(centerLat, centerLon, this.defaultZoom, null);
+        }
+    }
+
+    private void animateCameraToPos(double latitude, double longitude, float zoom, Runnable onFinished) {
+        if (this.mapProvider == null) return;
+        this.mapProvider.animateCamera(latitude, longitude, zoom, onFinished);
+    }
+}
